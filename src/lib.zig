@@ -1,5 +1,5 @@
 const std = @import("std");
-const c = @import("c.zig").c;
+const c = @import("c");
 
 // pub const ClassID = u32;
 
@@ -334,7 +334,7 @@ pub const Runtime = struct {
     // }
 };
 
-pub const Context = packed struct {
+pub const Context = struct {
     ptr: ?*c.JSContext,
 
     pub inline fn init(runtime: *const Runtime) Context {

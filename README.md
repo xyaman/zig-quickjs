@@ -4,7 +4,7 @@ Status: WIP. The majority of the Runtime, Context, and Value methods are exposed
 
 ## Installation
 
-Requires Zig `0.15.1`.
+Requires Zig `0.16.0`.
 
 ```
 zig fetch --save=quickjs \
@@ -18,6 +18,13 @@ zig fetch --save=quickjs \
 ```zig
 pub const Atom: (type);
 pub const Value: (type);
+
+pub const ArrayBuffer = struct {
+    buffer: Value,
+    byte_offset: usize,
+    byte_length: usize,
+    bytes_per_element: usize,
+};
 
 pub const NULL: Value;
 pub const UNDEFINED: Value;
@@ -47,28 +54,28 @@ pub const TypedArrayType = enum(c_int) {
 
 ```zig
 pub const Runtime = struct {
-    pub inline fn init() Runtime
-    pub inline fn deinit(self: Runtime) void
-    pub inline fn setMemoryLimit(self: Runtime, limit: usize) void
-    pub inline fn setGCThreshold(self: Runtime, gc_threshold: usize) void
-    pub inline fn getGCThreshold(self: Runtime) usize
-    pub inline fn setMaxStackSize(self: Runtime, stack_size: usize) void
-    pub inline fn updateStackTop(self: Runtime) void
-    pub inline fn setRuntimeInfo(self: Runtime, info: []const u8) void
-    pub inline fn setDumpFlags(self: Runtime, flags: u64) void
-    pub inline fn getDumpFlags(self: Runtime) u64
-    pub inline fn setRuntimeOpaque(self: Runtime, ptr: ?*anyopaque) void
-    pub inline fn getRuntimeOpaque(self: Runtime) ?*anyopaque
-    pub inline fn runGC(self: Runtime) void
-    pub inline fn isLiveObject(self: Runtime, obj: Value) bool
-    // pub inline fn markValue(self: Runtime, val: Value, mark_func: c.JS_MarkFunc) void
-    pub inline fn freeValueRT(self: Runtime, val: Value) void
-    pub inline fn dupValueRT(self: Runtime, val: Value) Value
-    pub inline fn newClassID(self: Runtime) !ClassID
-    pub inline fn isRegisteredClass(self: Runtime, class_id: ClassID) bool
-    // pub inline fn newClass(self: Runtime, class_id: ClassID, class_def: *const c.JSClassDef) !void
-    pub inline fn isJobPending(self: Runtime) bool
-    pub inline fn executePendingJob(self: Runtime) !?Context
+    pub fn init(allocator: std.mem.Allocator) !*Runtime
+    pub fn deinit(self: *const Runtime) void
+    pub inline fn setMemoryLimit(self: *const Runtime, limit: usize) void
+    pub inline fn setGCThreshold(self: *const Runtime, gc_threshold: usize) void
+    pub inline fn getGCThreshold(self: *const Runtime) usize
+    pub inline fn setMaxStackSize(self: *const Runtime, stack_size: usize) void
+    pub inline fn updateStackTop(self: *const Runtime) void
+    pub inline fn setRuntimeInfo(self: *const Runtime, info: []const u8) void
+    pub inline fn setDumpFlags(self: *const Runtime, flags: u64) void
+    pub inline fn getDumpFlags(self: *const Runtime) u64
+    pub inline fn setRuntimeOpaque(self: *const Runtime, ptr: ?*anyopaque) void
+    pub inline fn getRuntimeOpaque(self: *const Runtime) ?*anyopaque
+    pub inline fn runGC(self: *const Runtime) void
+    pub inline fn isLiveObject(self: *const Runtime, obj: Value) bool
+    pub inline fn markValue(self: *const Runtime, val: Value, mark_func: c.JS_MarkFunc) void
+    pub inline fn freeValue(self: *const Runtime, val: Value) void
+    pub inline fn dupValue(self: *const Runtime, val: Value) Value
+    // pub inline fn newClassID(self: *const Runtime) !ClassID
+    // pub inline fn isRegisteredClass(self: *const Runtime, class_id: ClassID) bool
+    // pub inline fn newClass(self: *const Runtime, class_id: ClassID, class_def: *const c.JSClassDef) !void
+    pub inline fn isJobPending(self: *const Runtime) bool
+    pub inline fn executePendingJob(self: *const Runtime) !?Context
 
     pub const MemoryUsage = packed struct {
         malloc_size: i64,
@@ -98,20 +105,14 @@ pub const Runtime = struct {
         binary_object_count: i64,
         binary_object_size: i64,
     };
-    pub inline fn computeMemoryUsage(self: Runtime) MemoryUsage
-    pub inline fn dumpMemoryUsage(self: Runtime, usage: *const MemoryUsage, file: std.fs.File) void
-    // pub inline fn setSharedArrayBufferFunctions(self: Runtime, functions: *const c.JSSharedArrayBufferFunctions) void
-    // pub inline fn setInterruptHandler(self: Runtime, cb: ?c.JSInterruptHandler, ptr: ?*anyopaque) void
-    pub inline fn setCanBlock(self: Runtime, can_block: bool) void
-    // pub inline fn setHostPromiseRejectionTracker(self: Runtime, cb: ?c.JSHostPromiseRejectionTracker, ptr: ?*anyopaque) void
-    // pub inline fn setModuleLoaderFunc(self: Runtime, module_normalize: ?c.JSModuleNormalizeFunc, module_loader: ?c.JSModuleLoaderFunc, ptr: ?*anyopaque) void
-    pub inline fn calloc(self: Runtime, count: usize, size: usize) ?*anyopaque
-    pub inline fn malloc(self: Runtime, size: usize) ?*anyopaque
-    pub inline fn free(self: Runtime, ptr: ?*anyopaque) void
-    pub inline fn realloc(self: Runtime, ptr: ?*anyopaque, size: usize) ?*anyopaque
-    pub inline fn mallocz(self: Runtime, size: usize) ?*anyopaque
-    pub inline fn mallocUsableSize(self: Runtime, ptr: ?*const anyopaque) usize
-    // pub inline fn addRuntimeFinalizer(self: Runtime, finalizer: c.JSRuntimeFinalizer, arg: ?*anyopaque) !void
+    pub inline fn computeMemoryUsage(self: *const Runtime) MemoryUsage
+    pub inline fn dumpMemoryUsage(self: *const Runtime, usage: *const MemoryUsage, file: std.fs.File) void
+    // pub inline fn setSharedArrayBufferFunctions(self: *const Runtime, functions: *const c.JSSharedArrayBufferFunctions) void
+    // pub inline fn setInterruptHandler(self: *const Runtime, cb: ?c.JSInterruptHandler, ptr: ?*anyopaque) void
+    pub inline fn setCanBlock(self: *const Runtime, can_block: bool) void
+    // pub inline fn setHostPromiseRejectionTracker(self: *const Runtime, cb: ?c.JSHostPromiseRejectionTracker, ptr: ?*anyopaque) void
+    // pub inline fn setModuleLoaderFunc(self: *const Runtime, module_normalize: ?c.JSModuleNormalizeFunc, module_loader: ?c.JSModuleLoaderFunc, ptr: ?*anyopaque) void
+    // pub inline fn addRuntimeFinalizer(self: *const Runtime, finalizer: c.JSRuntimeFinalizer, arg: ?*anyopaque) !void
 };
 ```
 
@@ -119,10 +120,10 @@ pub const Runtime = struct {
 
 ```zig
 pub const Context = struct {
-    pub inline fn init(runtime: Runtime) Context
+    pub inline fn init(runtime: *const Runtime) Context
     pub inline fn deinit(self: Context) void
 
-    pub inline fn getRuntime(self: Context) Runtime
+    // pub inline fn getRuntime(self: Context) Runtime
 
     pub inline fn isEqual(self: Context, a: Value, b: Value) bool
     pub inline fn isStrictEqual(self: Context, a: Value, b: Value) bool
@@ -140,6 +141,7 @@ pub const Context = struct {
     pub inline fn newSymbol(self: Context, description: []const u8, is_global: bool) Value
     pub inline fn newAtomString(self: Context, str: []const u8) Value
     pub inline fn newObject(self: Context) Value
+    pub inline fn newObjectClass(self: Context, class_id: i32) Value
     pub inline fn newArray(self: Context) Value
     pub inline fn newDate(self: Context, epoch_ms: f64) Value
     pub inline fn newBigInt64(self: Context, val: i64) Value
@@ -155,9 +157,9 @@ pub const Context = struct {
     pub inline fn toBigInt64(self: Context, val: Value) !i64
     pub inline fn toBigUint64(self: Context, val: Value) !u64
     pub inline fn toString(self: Context, val: Value) Value
-    pub inline fn toCString(self: Context, val: Value) ?[*:0]const u8
-    pub inline fn toCStringLen(self: Context, val: Value) ?struct { str: [*:0]const u8, len: usize }
-    // pub inline fn toCStringOwned(self: Context, val: Value) ?[:0]const u8
+    pub inline fn toCString(self: Context, val: Value) ![*:0]const u8
+    pub inline fn toCStringLen(self: Context, val: Value) ![:0]const u8
+    // pub inline fn toCStringOwned(self: Context, val: Value) ![:0]const u8
     pub inline fn freeCString(self: Context, ptr: [*:0]const u8) void
     pub inline fn toPropertyKey(self: Context, val: Value) Value
     pub inline fn toObject(self: Context, val: Value) Value
@@ -197,16 +199,16 @@ pub const Context = struct {
     pub inline fn getException(self: Context) Value
     pub inline fn hasException(self: Context) bool
     pub inline fn getProperty(self: Context, obj: Value, prop: Atom) Value
-    pub inline fn getPropertyStr(self: Context, obj: Value, prop: []const u8) Value
+    pub inline fn getPropertyStr(self: Context, obj: Value, prop: [*:0]const u8) Value
     pub inline fn getPropertyUint32(self: Context, obj: Value, idx: u32) Value
     pub inline fn getPropertyInt64(self: Context, obj: Value, idx: i64) Value
     pub inline fn setProperty(self: Context, obj: Value, prop: Atom, val: Value) !void
-    pub inline fn setPropertyStr(self: Context, obj: Value, prop: []const u8, val: Value) !void
+    pub inline fn setPropertyStr(self: Context, obj: Value, prop: [*:0]const u8, val: Value) !void
     pub inline fn setPropertyUint32(self: Context, obj: Value, idx: u32, val: Value) !void
     pub inline fn setPropertyInt64(self: Context, obj: Value, idx: i64, val: Value) !void
     pub inline fn hasProperty(self: Context, obj: Value, prop: Atom) !bool
     pub inline fn deleteProperty(self: Context, obj: Value, prop: Atom, flags: c_int) !bool
-    pub inline fn eval(self: Context, input: []const u8, filename: []const u8, flags: EvalFlags) Value
+    pub inline fn eval(self: Context, input: []const u8, filename: [*:0]const u8, flags: EvalFlags) error{Exception}!Value
     pub inline fn getGlobalObject(self: Context) Value
     pub inline fn isInstanceOf(self: Context, val: Value, obj: Value) !bool
     pub inline fn call(self: Context, func_obj: Value, this_obj: Value, args: []const Value) Value
@@ -218,11 +220,11 @@ pub const Context = struct {
     pub inline fn getUint8Array(self: Context, obj: Value) ![]u8
     // pub inline fn newUint8Array(self: Context, buf: []u8, free_func: ?c.JSFreeArrayBufferDataFunc, ptr: ?*anyopaque, is_shared: bool) Value
     pub inline fn newUint8ArrayCopy(self: Context, buf: []const u8) Value
-    pub inline fn getTypedArrayType(self: Context, obj: Value) ?TypedArrayType
-    pub inline fn getTypedArrayBuffer(self: Context, obj: Value) !struct { buffer: Value, byte_offset: usize, byte_length: usize, bytes_per_element: usize }
+    pub inline fn getTypedArrayType(self: Context, obj: Value) !TypedArrayType
+    pub inline fn getTypedArrayBuffer(self: Context, obj: Value) !ArrayBuffer
     pub inline fn promiseState(self: Context, promise: Value) PromiseState
     pub inline fn promiseResult(self: Context, promise: Value) Value
-    pub inline fn parseJSON(self: Context, buf: []const u8, filename: []const u8) Value
+    pub inline fn parseJSON(self: Context, buf: []const u8, filename: [*:0]const u8) Value
     pub inline fn jsonStringify(self: Context, obj: Value, replacer: Value, space: Value) Value
     pub inline fn newAtom(self: Context, str: []const u8) Atom
     pub inline fn newAtomUint32(self: Context, n: u32) Atom
@@ -230,23 +232,23 @@ pub const Context = struct {
     pub inline fn freeAtom(self: Context, atom: Atom) void
     pub inline fn atomToValue(self: Context, atom: Atom) Value
     pub inline fn atomToString(self: Context, atom: Atom) Value
-    pub inline fn atomToCString(self: Context, atom: Atom) ?[*:0]const u8
+    pub inline fn atomToCString(self: Context, atom: Atom) ![*:0]const u8
     pub inline fn valueToAtom(self: Context, val: Value) Atom
     // pub inline fn getOwnPropertyNames(self: Context, obj: Value, flags: PropertyEnumFlags) ![]c.JSPropertyEnum
     // pub inline fn freePropertyEnum(self: Context, tab: []c.JSPropertyEnum) void
     pub inline fn getOwnProperty(self: Context, obj: Value, prop: Atom) !PropertyDescriptor
     pub inline fn isExtensible(self: Context, obj: Value) !bool
     pub inline fn preventExtensions(self: Context, obj: Value) !bool
-    pub inline fn defineProperty(self: Context, obj: Value, prop: Atom, val: Value, getter: Value, setter: Value, flags: PropertyFlags) !bool
-    pub inline fn definePropertyValue(self: Context, obj: Value, prop: Atom, val: Value, flags: PropertyFlags) !bool
+    pub inline fn defineProperty(self: Context, obj: Value, prop: Atom, val: Value, getter: Value, setter: Value, flags: DefinePropertyFlags) !bool
+    pub inline fn definePropertyValue(self: Context, obj: Value, prop: Atom, val: Value, flags: DefinePropertyFlags) !bool
     pub inline fn definePropertyValueStr(self: Context, obj: Value, prop: []const u8, val: Value, flags: PropertyFlags) !bool
     pub inline fn definePropertyValueUint32(self: Context, obj: Value, idx: u32, val: Value, flags: PropertyFlags) !bool
     pub inline fn definePropertyGetSet(self: Context, obj: Value, prop: Atom, getter: Value, setter: Value, flags: PropertyFlags) !bool
-    pub inline fn setOpaque(_: Context, obj: Value, ptr: ?*anyopaque) !void
-    pub inline fn getOpaque(_: Context, obj: Value, class_id: ClassID) ?*anyopaque
-    pub inline fn getOpaque2(self: Context, obj: Value, class_id: ClassID) ?*anyopaque
-    pub inline fn setClassProto(self: Context, class_id: ClassID, proto: Value) void
-    pub inline fn getClassProto(self: Context, class_id: ClassID) Value
+    // pub inline fn setOpaque(_: Context, obj: Value, ptr: ?*anyopaque) !void
+    // pub inline fn getOpaque(_: Context, obj: Value, class_id: ClassID) ?*anyopaque
+    // pub inline fn getOpaque2(self: Context, obj: Value, class_id: ClassID) ?*anyopaque
+    // pub inline fn setClassProto(self: Context, class_id: ClassID, proto: Value) void
+    // pub inline fn getClassProto(self: Context, class_id: ClassID) Value
     pub inline fn getFunctionProto(self: Context) Value
     pub inline fn addIntrinsicBaseObjects(self: Context) void
     pub inline fn addIntrinsicDate(self: Context) void
@@ -274,7 +276,7 @@ pub const Context = struct {
     pub inline fn evalFunction(self: Context, fun_obj: Value) Value
     pub inline fn getScriptOrModuleName(self: Context, n_stack_levels: i32) Atom
     pub inline fn loadModule(self: Context, basename: ?[]const u8, filename: []const u8) Value
-    // pub inline fn newCModule(self: Context, name: []const u8, func: c.JSModuleInitFunc) ?Module
+    pub inline fn newCModule(self: Context, name: []const u8, func: c.JSModuleInitFunc) ?Module
     pub inline fn addModuleExport(self: Context, m: Module, name: []const u8) !void
     pub inline fn setModuleExport(self: Context, m: Module, name: []const u8, val: Value) !void
     // pub inline fn enqueueJob(self: Context, job_func: c.JSJobFunc, args: []const Value) !void
