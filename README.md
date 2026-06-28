@@ -141,7 +141,7 @@ pub const Context = struct {
     pub inline fn newSymbol(self: Context, description: []const u8, is_global: bool) Value
     pub inline fn newAtomString(self: Context, str: []const u8) Value
     pub inline fn newObject(self: Context) Value
-    pub inline fn newObjectClass(self: Context, class_id: i32) Value
+    pub inline fn newObjectClass(self: Context, class_id: c.JSClassID) Value
     pub inline fn newArray(self: Context) Value
     pub inline fn newDate(self: Context, epoch_ms: f64) Value
     pub inline fn newBigInt64(self: Context, val: i64) Value

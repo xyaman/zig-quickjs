@@ -6,8 +6,8 @@
     .version = "0.1.0",
     .dependencies = .{
         .quickjs = .{
-            .url = "https://github.com/quickjs-ng/quickjs/archive/refs/tags/v0.10.1.tar.gz",
-            .hash = "N-V-__8AAAIHPACETf0-OAZkJJtbhcPd_rMjP_tgrszOAmNS",
+            .url = "https://github.com/quickjs-ng/quickjs/archive/refs/tags/v0.15.1.tar.gz",
+            .hash = "N-V-__8AADVSQQAuOTWaTtpZv890cKhmNLPE9UbCFZv0uFX9",
         },
     },
 }

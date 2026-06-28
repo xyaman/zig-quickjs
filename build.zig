@@ -29,9 +29,8 @@ pub fn build(b: *std.Build) void {
         .files = &.{
             "quickjs.c",
             "libregexp.c",
-            "cutils.c",
             "libunicode.c",
-            "xsum.c",
+            "dtoa.c",
         },
     });
 

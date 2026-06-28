@@ -412,7 +412,7 @@ pub const Context = struct {
         return c.JS_NewObject(self.ptr);
     }
 
-    pub inline fn newObjectClass(self: Context, class_id: i32) Value {
+    pub inline fn newObjectClass(self: Context, class_id: c.JSClassID) Value {
         return c.JS_NewObjectClass(self.ptr, class_id);
     }
 
@@ -604,12 +604,12 @@ pub const Context = struct {
         return c.JS_IsConstructor(self.ptr, val);
     }
 
-    pub inline fn isError(self: Context, val: Value) bool {
-        return c.JS_IsError(self.ptr, val);
+    pub inline fn isError(_: Context, val: Value) bool {
+        return c.JS_IsError(val);
     }
 
-    pub inline fn isBigInt(self: Context, val: Value) bool {
-        return c.JS_IsBigInt(self.ptr, val);
+    pub inline fn isBigInt(_: Context, val: Value) bool {
+        return c.JS_IsBigInt(val);
     }
 
     pub inline fn getPrototype(self: Context, val: Value) Value {
