@@ -18,6 +18,8 @@ pub fn build(b: *std.Build) void {
 
     const quickjs = b.addModule("quickjs", .{
         .root_source_file = b.path("src/lib.zig"),
+        .target = target,
+        .optimize = optimize,
         .link_libc = true,
         .imports = &.{
             .{ .name = "c", .module = c_module },
@@ -51,4 +53,21 @@ pub fn build(b: *std.Build) void {
     const test_runner = b.addRunArtifact(tests);
 
     b.step("test", "Run QuickJS tests").dependOn(&test_runner.step);
+
+    // Documentation
+
+    const lib = b.addLibrary(.{
+        .name = "quickjs",
+        .root_module = quickjs,
+        .linkage = .static,
+    });
+
+    const docs_install = b.addInstallDirectory(.{
+        .source_dir = lib.getEmittedDocs(),
+        .install_dir = .prefix,
+        .install_subdir = "docs",
+    });
+
+    const docs_step = b.step("docs", "Generate HTML documentation");
+    docs_step.dependOn(&docs_install.step);
 }

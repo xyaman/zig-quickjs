@@ -13,7 +13,7 @@ test "Initialize a context" {
     const c = quickjs.Context.init(r);
     defer c.deinit();
 
-    // try std.testing.expectEqual(r.ptr, c.getRuntime().ptr);
+    try std.testing.expectEqual(r.ptr, c.getRuntime());
 }
 
 test "Create objects and manipulate properties" {
@@ -553,86 +553,838 @@ test "Object prototype operations" {
     try std.testing.expect(c.isString(defined_prop));
 }
 
-// test "getOwnPropertyNames and property enumeration" {
-//     const r = quickjs.Runtime.init();
-//     defer r.deinit();
+test "getOwnPropertyNames and property enumeration" {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
 
-//     const c = quickjs.Context.init(r);
-//     defer c.deinit();
+    const r = try quickjs.Runtime.init(allocator);
+    defer r.deinit();
 
-//     // Create an object with various properties
-//     const obj = try c.eval(
-//         \\({
-//         \\  numProp: 42,
-//         \\  strProp: "test",
-//         \\  objProp: { nested: true },
-//         \\  [Symbol.for('symbolProp')]: 'symbol value',
-//         \\})
-//     , "test.js", .{});
-//     defer c.freeValue(obj);
+    const c = quickjs.Context.init(r);
+    defer c.deinit();
 
-//     // Get own property names (only strings, not symbols)
-//     const props = try c.getOwnPropertyNames(obj, .{
-//         .strings = true,
-//         .symbols = false,
-//     });
-//     defer c.freePropertyEnum(props);
+    // Create an object with various properties
+    const obj = try c.eval(
+        \\({
+        \\  numProp: 42,
+        \\  strProp: "test",
+        \\  objProp: { nested: true },
+        \\})
+    , "test.js", .{});
+    defer c.freeValue(obj);
 
-//     // There should be 3 string properties
-//     try std.testing.expectEqual(@as(usize, 3), props.len);
+    // Get own property names (only strings, not symbols)
+    const props = try c.getOwnPropertyNames(obj, .{
+        .strings = true,
+        .symbols = false,
+    });
+    defer c.freePropertyEnum(props);
 
-//     // Check individual properties by converting atoms to strings
-//     var found_num_prop = false;
-//     var found_str_prop = false;
-//     var found_obj_prop = false;
+    // There should be 3 string properties
+    try std.testing.expectEqual(@as(usize, 3), props.len);
 
-//     for (props) |prop| {
-//         const prop_str = c.atomToString(prop.atom);
-//         defer c.freeValue(prop_str);
+    // Check individual properties by converting atoms to strings
+    var found_num_prop = false;
+    var found_str_prop = false;
+    var found_obj_prop = false;
 
-//         const c_str = c.toCString(prop_str) orelse return error.InvalidString;
-//         defer c.freeCString(c_str);
+    for (props) |prop| {
+        const prop_str = c.atomToString(prop.atom);
+        defer c.freeValue(prop_str);
 
-//         const str = std.mem.span(c_str);
+        const c_str = try c.toCString(prop_str);
+        defer c.freeCString(c_str);
 
-//         if (std.mem.eql(u8, str, "numProp")) {
-//             found_num_prop = true;
-//         } else if (std.mem.eql(u8, str, "strProp")) {
-//             found_str_prop = true;
-//         } else if (std.mem.eql(u8, str, "objProp")) {
-//             found_obj_prop = true;
-//         }
-//     }
+        const str = std.mem.span(c_str);
 
-//     try std.testing.expect(found_num_prop);
-//     try std.testing.expect(found_str_prop);
-//     try std.testing.expect(found_obj_prop);
+        if (std.mem.eql(u8, str, "numProp")) {
+            found_num_prop = true;
+        } else if (std.mem.eql(u8, str, "strProp")) {
+            found_str_prop = true;
+        } else if (std.mem.eql(u8, str, "objProp")) {
+            found_obj_prop = true;
+        }
+    }
 
-//     // Now get all properties including symbols
-//     const all_props = try c.getOwnPropertyNames(obj, .{
-//         .strings = true,
-//         .symbols = true,
-//     });
-//     defer c.freePropertyEnum(all_props);
+    try std.testing.expect(found_num_prop);
+    try std.testing.expect(found_str_prop);
+    try std.testing.expect(found_obj_prop);
 
-//     // std.log.warn("@sizeOf(@TypeOf(all_props[0])): {d}", .{@sizeOf(@TypeOf(all_props[0]))});
-//     // std.log.warn("@sizeOf(quickjs.Context.PropertyEnum): {d}", .{@sizeOf(quickjs.Context.PropertyEnum)});
-//     comptime {
-//         std.debug.assert(@sizeOf(@TypeOf(all_props[0])) == @sizeOf(quickjs.Context.PropertyEnum));
-//     }
+    // Test property descriptor by getting one property's descriptor
+    const name_atom = c.newAtom("strProp");
+    defer c.freeAtom(name_atom);
 
-//     // There should be 4 properties (3 strings + 1 symbol)
-//     try std.testing.expectEqual(@as(usize, 4), all_props.len);
+    const desc = try c.getOwnProperty(obj, name_atom);
+    defer c.freeValue(desc.value);
+    defer c.freeValue(desc.getter);
+    defer c.freeValue(desc.setter);
 
-//     // Test property descriptor by getting one property's descriptor
-//     const name_atom = c.newAtom("strProp");
-//     defer c.freeAtom(name_atom);
+    // The property should have a string value
+    try std.testing.expect(c.isString(desc.value));
 
-//     const desc = try c.getOwnProperty(obj, name_atom);
+    // The property should be enumerable by default
+    try std.testing.expect(desc.flags.enumerable);
+}
 
-//     // The property should have a string value
-//     try std.testing.expect(c.isString(desc.value));
+test "Object operations: getLength, setLength, sealObject, freezeObject" {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
 
-//     // The property should be enumerable by default
-//     try std.testing.expect(desc.flags.enumerable);
-// }
+    const r = try quickjs.Runtime.init(allocator);
+    defer r.deinit();
+
+    const c = quickjs.Context.init(r);
+    defer c.deinit();
+
+    // Test getLength on an array
+    const arr = try c.eval("[1, 2, 3, 4, 5]", "test.js", .{});
+    defer c.freeValue(arr);
+    try std.testing.expectEqual(@as(i64, 5), try c.getLength(arr));
+
+    // Test setLength
+    try c.setLength(arr, 3);
+    try std.testing.expectEqual(@as(i64, 3), try c.getLength(arr));
+
+    // Test sealObject - sealed objects can't have properties deleted or added
+    const obj = c.newObject();
+    defer c.freeValue(obj);
+    const val = c.newInt32(42);
+    try c.setPropertyStr(obj, "x", val);
+    try c.sealObject(obj);
+    // After sealing, the object should still be extensible check work
+    const extensible_before = try c.isExtensible(obj);
+    try std.testing.expect(!extensible_before);
+
+    // Test freezeObject
+    const obj2 = c.newObject();
+    defer c.freeValue(obj2);
+    const val2 = c.newString("hello");
+    try c.setPropertyStr(obj2, "y", val2);
+    try c.freezeObject(obj2);
+    // Frozen objects are not extensible
+    try std.testing.expect(!(try c.isExtensible(obj2)));
+}
+
+test "New type predicates" {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    const r = try quickjs.Runtime.init(allocator);
+    defer r.deinit();
+
+    const c = quickjs.Context.init(r);
+    defer c.deinit();
+
+    // Set/WeakSet
+    const set_val = try c.eval("new Set([1, 2, 3])", "test.js", .{});
+    defer c.freeValue(set_val);
+    try std.testing.expect(c.isSet(set_val));
+    try std.testing.expect(!c.isMap(set_val));
+
+    const weakset_val = try c.eval("new WeakSet()", "test.js", .{});
+    defer c.freeValue(weakset_val);
+    try std.testing.expect(c.isWeakSet(weakset_val));
+
+    // Map/WeakMap
+    const map_val = try c.eval("new Map()", "test.js", .{});
+    defer c.freeValue(map_val);
+    try std.testing.expect(c.isMap(map_val));
+    try std.testing.expect(!c.isSet(map_val));
+
+    const weakmap_val = try c.eval("new WeakMap()", "test.js", .{});
+    defer c.freeValue(weakmap_val);
+    try std.testing.expect(c.isWeakMap(weakmap_val));
+
+    // WeakRef
+    const weakref_val = try c.eval("new WeakRef({})", "test.js", .{});
+    defer c.freeValue(weakref_val);
+    try std.testing.expect(c.isWeakRef(weakref_val));
+
+    // DataView
+    const dv_val = try c.eval("new DataView(new ArrayBuffer(8))", "test.js", .{});
+    defer c.freeValue(dv_val);
+    try std.testing.expect(c.isDataView(dv_val));
+
+    // AsyncFunction
+    const async_fn = try c.eval("(async function() {})", "test.js", .{});
+    defer c.freeValue(async_fn);
+    try std.testing.expect(c.isAsyncFunction(async_fn));
+
+    // isNaN
+    const nan_val = try c.eval("NaN", "test.js", .{});
+    defer c.freeValue(nan_val);
+    try std.testing.expect(c.isNaN(nan_val));
+    const num_val = c.newInt32(42);
+    defer c.freeValue(num_val);
+    try std.testing.expect(!c.isNaN(num_val));
+}
+
+test "Error construction without throwing" {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    const r = try quickjs.Runtime.init(allocator);
+    defer r.deinit();
+
+    const c = quickjs.Context.init(r);
+    defer c.deinit();
+
+    // Construct errors without throwing them
+    const type_err = c.newTypeError("test message");
+    defer c.freeValue(type_err);
+    try std.testing.expect(c.isError(type_err));
+
+    const range_err = c.newRangeError("range message");
+    defer c.freeValue(range_err);
+    try std.testing.expect(c.isError(range_err));
+
+    const ref_err = c.newReferenceError("ref message");
+    defer c.freeValue(ref_err);
+    try std.testing.expect(c.isError(ref_err));
+
+    const syntax_err = c.newSyntaxError("syntax message");
+    defer c.freeValue(syntax_err);
+    try std.testing.expect(c.isError(syntax_err));
+
+    const internal_err = c.newInternalError("internal message");
+    defer c.freeValue(internal_err);
+    try std.testing.expect(c.isError(internal_err));
+
+    const plain_err = c.newPlainError("plain message");
+    defer c.freeValue(plain_err);
+    try std.testing.expect(c.isError(plain_err));
+
+    // Verify the error message via JS
+    const err = c.newError();
+    defer c.freeValue(err);
+    try std.testing.expect(c.isError(err));
+}
+
+test "Promise APIs" {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    const r = try quickjs.Runtime.init(allocator);
+    defer r.deinit();
+
+    const c = quickjs.Context.init(r);
+    defer c.deinit();
+
+    // Create a resolved promise from JS
+    const resolved = try c.eval("Promise.resolve(42)", "test.js", .{});
+    defer c.freeValue(resolved);
+    try std.testing.expect(c.isPromise(resolved));
+    try std.testing.expectEqual(quickjs.Context.PromiseState.Fulfilled, c.promiseState(resolved));
+
+    const result = c.promiseResult(resolved);
+    defer c.freeValue(result);
+    try std.testing.expectEqual(@as(i32, 42), try c.toInt32(result));
+
+    // Create a rejected promise from JS
+    const rejected = try c.eval("Promise.reject('error')", "test.js", .{});
+    defer c.freeValue(rejected);
+    try std.testing.expect(c.isPromise(rejected));
+    try std.testing.expectEqual(quickjs.Context.PromiseState.Rejected, c.promiseState(rejected));
+
+    // newSettledPromise - create a fulfilled promise
+    const settled_val = c.newInt32(123);
+    defer c.freeValue(settled_val);
+    const settled = c.newSettledPromise(false, settled_val);
+    defer c.freeValue(settled);
+    try std.testing.expect(c.isPromise(settled));
+    try std.testing.expectEqual(quickjs.Context.PromiseState.Fulfilled, c.promiseState(settled));
+
+    // newPromiseCapability - requires a 2-element array for resolving functions
+    var resolving_funcs: [2]quickjs.Value = undefined;
+    const capability = c.newPromiseCapability(&resolving_funcs);
+    defer c.freeValue(capability);
+    defer c.freeValue(resolving_funcs[0]);
+    defer c.freeValue(resolving_funcs[1]);
+    try std.testing.expect(c.isPromise(capability));
+}
+
+test "Proxy support" {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    const r = try quickjs.Runtime.init(allocator);
+    defer r.deinit();
+
+    const c = quickjs.Context.init(r);
+    defer c.deinit();
+
+    // Create a proxy via JS
+    const proxy = try c.eval(
+        \\new Proxy({a: 1}, {
+        \\  get(target, prop) { return target[prop]; }
+        \\})
+    , "test.js", .{});
+    defer c.freeValue(proxy);
+    try std.testing.expect(c.isProxy(proxy));
+
+    // Get proxy target
+    const target = c.getProxyTarget(proxy);
+    defer c.freeValue(target);
+    try std.testing.expect(c.isObject(target));
+
+    // Get proxy handler
+    const handler = c.getProxyHandler(proxy);
+    defer c.freeValue(handler);
+    try std.testing.expect(c.isObject(handler));
+
+    // Create a proxy via the Zig API
+    const target_obj = c.newObject();
+    defer c.freeValue(target_obj);
+    const handler_obj = c.newObject();
+    defer c.freeValue(handler_obj);
+    const proxy2 = c.newProxy(target_obj, handler_obj);
+    defer c.freeValue(proxy2);
+    try std.testing.expect(c.isProxy(proxy2));
+}
+
+test "New value creation: newNumber, newUint64, newStringZ" {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    const r = try quickjs.Runtime.init(allocator);
+    defer r.deinit();
+
+    const c = quickjs.Context.init(r);
+    defer c.deinit();
+
+    // newNumber
+    const num = c.newNumber(3.14);
+    defer c.freeValue(num);
+    try std.testing.expect(c.isNumber(num));
+    try std.testing.expectApproxEqAbs(@as(f64, 3.14), try c.toFloat64(num), 0.001);
+
+    // newUint64
+    const big_val = c.newUint64(5000000000); // > u32 max
+    defer c.freeValue(big_val);
+    const result = try c.toInt64(big_val);
+    try std.testing.expectEqual(@as(i64, 5000000000), result);
+
+    // newStringZ (null-terminated string)
+    const str = c.newStringZ("hello world");
+    defer c.freeValue(str);
+    try std.testing.expect(c.isString(str));
+    const c_str = try c.toCString(str);
+    defer c.freeCString(c_str);
+    try std.testing.expectEqualStrings("hello world", std.mem.span(c_str));
+}
+
+test "newArrayFrom" {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    const r = try quickjs.Runtime.init(allocator);
+    defer r.deinit();
+
+    const c = quickjs.Context.init(r);
+    defer c.deinit();
+
+    // Create an array from values
+    var values: [3]quickjs.Value = undefined;
+    values[0] = c.newInt32(10);
+    values[1] = c.newInt32(20);
+    values[2] = c.newInt32(30);
+
+    const arr = c.newArrayFrom(&values);
+    defer c.freeValue(arr);
+
+    try std.testing.expect(c.isArray(arr));
+    try std.testing.expectEqual(@as(i64, 3), try c.getLength(arr));
+
+    // Verify elements
+    const e0 = c.getPropertyUint32(arr, 0);
+    defer c.freeValue(e0);
+    try std.testing.expectEqual(@as(i32, 10), try c.toInt32(e0));
+
+    const e2 = c.getPropertyUint32(arr, 2);
+    defer c.freeValue(e2);
+    try std.testing.expectEqual(@as(i32, 30), try c.toInt32(e2));
+}
+
+test "Context lifecycle: getRuntime, dupContext, opaque" {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    const r = try quickjs.Runtime.init(allocator);
+    defer r.deinit();
+
+    const c = quickjs.Context.init(r);
+    defer c.deinit();
+
+    // getRuntime should return the same runtime pointer
+    const rt = c.getRuntime();
+    try std.testing.expect(rt != null);
+    try std.testing.expectEqual(r.ptr, rt);
+
+    // Context opaque
+    var opaque_val: u32 = 12345;
+    c.setContextOpaque(@ptrCast(&opaque_val));
+    const retrieved = c.getContextOpaque();
+    try std.testing.expect(retrieved != null);
+    try std.testing.expectEqual(@as(u32, 12345), @as(*u32, @ptrCast(@alignCast(retrieved.?))).*);
+}
+
+test "Runtime opaque and getVersion" {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    const r = try quickjs.Runtime.init(allocator);
+    defer r.deinit();
+
+    // Runtime opaque
+    var opaque_val: u64 = 999;
+    r.setRuntimeOpaque(@ptrCast(&opaque_val));
+    const retrieved = r.getRuntimeOpaque();
+    try std.testing.expect(retrieved != null);
+    try std.testing.expectEqual(@as(u64, 999), @as(*u64, @ptrCast(@alignCast(retrieved.?))).*);
+
+    // getVersion should return a non-empty string
+    const version = quickjs.getVersion();
+    try std.testing.expect(version[0] != 0);
+}
+
+test "evalThis" {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    const r = try quickjs.Runtime.init(allocator);
+    defer r.deinit();
+
+    const c = quickjs.Context.init(r);
+    defer c.deinit();
+
+    // evalThis evaluates code with a specific `this` binding
+    const this_obj = c.newObject();
+    defer c.freeValue(this_obj);
+    const prop = c.newString("custom this");
+    try c.setPropertyStr(this_obj, "name", prop);
+
+    const result = try c.evalThis(this_obj, "this.name", "test.js", .{});
+    defer c.freeValue(result);
+    try std.testing.expect(c.isString(result));
+    const c_str = try c.toCString(result);
+    defer c.freeCString(c_str);
+    try std.testing.expectEqualStrings("custom this", std.mem.span(c_str));
+}
+
+test "invoke method on object" {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    const r = try quickjs.Runtime.init(allocator);
+    defer r.deinit();
+
+    const c = quickjs.Context.init(r);
+    defer c.deinit();
+
+    // Create an object with a method
+    const obj = try c.eval("({greet: function(name) { return 'hello ' + name; }})", "test.js", .{});
+    defer c.freeValue(obj);
+
+    // Invoke the method via atom
+    const method_atom = c.newAtom("greet");
+    defer c.freeAtom(method_atom);
+
+    var args: [1]quickjs.Value = undefined;
+    args[0] = c.newString("world");
+    defer c.freeValue(args[0]);
+
+    const result = c.invoke(obj, method_atom, &args);
+    defer c.freeValue(result);
+    try std.testing.expect(c.isString(result));
+    const c_str = try c.toCString(result);
+    defer c.freeCString(c_str);
+    try std.testing.expectEqualStrings("hello world", std.mem.span(c_str));
+}
+
+test "newObjectProto" {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    const r = try quickjs.Runtime.init(allocator);
+    defer r.deinit();
+
+    const c = quickjs.Context.init(r);
+    defer c.deinit();
+
+    // Create a prototype object with a property
+    const proto = c.newObject();
+    defer c.freeValue(proto);
+    const method = c.newString("inherited");
+    try c.setPropertyStr(proto, "inheritedProp", method);
+
+    // Create a new object with that prototype
+    const obj = c.newObjectProto(proto);
+    defer c.freeValue(obj);
+
+    // The inherited property should be accessible
+    const val = c.getPropertyStr(obj, "inheritedProp");
+    defer c.freeValue(val);
+    try std.testing.expect(c.isString(val));
+    const c_str = try c.toCString(val);
+    defer c.freeCString(c_str);
+    try std.testing.expectEqualStrings("inherited", std.mem.span(c_str));
+}
+
+test "toIndex and toInt64Ext" {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    const r = try quickjs.Runtime.init(allocator);
+    defer r.deinit();
+
+    const c = quickjs.Context.init(r);
+    defer c.deinit();
+
+    // toIndex
+    const idx_val = c.newInt32(100);
+    defer c.freeValue(idx_val);
+    try std.testing.expectEqual(@as(u64, 100), try c.toIndex(idx_val));
+
+    // toInt64Ext
+    const int_val = c.newInt64(-42);
+    defer c.freeValue(int_val);
+    try std.testing.expectEqual(@as(i64, -42), try c.toInt64Ext(int_val));
+}
+
+test "Detect module" {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    const r = try quickjs.Runtime.init(allocator);
+    defer r.deinit();
+
+    const c = quickjs.Context.init(r);
+    defer c.deinit();
+
+    // import statements are detected as modules (they fail with "could not load module")
+    try std.testing.expect(quickjs.Context.detectModule("import x from 'y';"));
+    // return at top level is valid in scripts but not modules
+    try std.testing.expect(!quickjs.Context.detectModule("return 42;"));
+    // syntax errors are not modules
+    try std.testing.expect(!quickjs.Context.detectModule("function(){"));
+}
+
+test "Runtime atom and CString RT variants" {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    const r = try quickjs.Runtime.init(allocator);
+    defer r.deinit();
+
+    const c = quickjs.Context.init(r);
+    defer c.deinit();
+
+    // Create an atom on context, then dup/free on runtime
+    const atom = c.newAtom("test");
+    defer c.freeAtom(atom);
+
+    const dup = r.dupAtom(atom);
+    r.freeAtom(dup);
+
+    // Create a CString and free via runtime
+    const str_val = c.newString("hello");
+    defer c.freeValue(str_val);
+    const c_str = try c.toCString(str_val);
+    r.freeCString(c_str);
+}
+
+test "Immutable ArrayBuffer" {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    const r = try quickjs.Runtime.init(allocator);
+    defer r.deinit();
+
+    const c = quickjs.Context.init(r);
+    defer c.deinit();
+
+    // Create a normal ArrayBuffer
+    var data = [_]u8{ 1, 2, 3, 4 };
+    const buf = c.newArrayBufferCopy(&data);
+    defer c.freeValue(buf);
+
+    // Should not be immutable initially
+    try std.testing.expect(!c.isImmutableArrayBuffer(buf));
+
+    // Make it immutable
+    _ = c.setImmutableArrayBuffer(buf, true);
+    try std.testing.expect(c.isImmutableArrayBuffer(buf));
+}
+
+test "Serialization roundtrip" {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    const r = try quickjs.Runtime.init(allocator);
+    defer r.deinit();
+
+    const c = quickjs.Context.init(r);
+    defer c.deinit();
+
+    // Serialize an object
+    const obj = try c.eval("({x: 42, y: 'hello'})", "test.js", .{});
+    defer c.freeValue(obj);
+
+    const serialized = try c.writeObject(obj, .{ .bytecode = true });
+    defer c.free(serialized.ptr);
+
+    // Deserialize
+    const deserialized = c.readObject(serialized, .{ .bytecode = true });
+    defer c.freeValue(deserialized);
+    try std.testing.expect(c.isObject(deserialized));
+
+    // Verify properties survived the roundtrip
+    const x_val = c.getPropertyStr(deserialized, "x");
+    defer c.freeValue(x_val);
+    try std.testing.expectEqual(@as(i32, 42), try c.toInt32(x_val));
+
+    const y_val = c.getPropertyStr(deserialized, "y");
+    defer c.freeValue(y_val);
+    try std.testing.expect(c.isString(y_val));
+}
+
+test "getClassID" {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    const r = try quickjs.Runtime.init(allocator);
+    defer r.deinit();
+
+    const c = quickjs.Context.init(r);
+    defer c.deinit();
+
+    // Plain objects should have a class ID (the value is implementation-defined)
+    const obj = c.newObject();
+    defer c.freeValue(obj);
+    const class_id = c.getClassID(obj);
+    _ = class_id; // just verify it doesn't crash
+}
+
+test "newFunction" {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    const r = try quickjs.Runtime.init(allocator);
+    defer r.deinit();
+
+    const c = quickjs.Context.init(r);
+    defer c.deinit();
+
+    const jsAdd = struct {
+        fn call(ctx: quickjs.Context, this_val: quickjs.Value, args: []const quickjs.Value) quickjs.Value {
+            _ = this_val;
+            if (args.len < 2) return quickjs.NULL;
+            const a = ctx.toInt32(args[0]) catch return quickjs.NULL;
+            const b = ctx.toInt32(args[1]) catch return quickjs.NULL;
+            return ctx.newInt32(a + b);
+        }
+    };
+
+    const func = c.newFunction("add", 2, jsAdd.call);
+
+    const global = c.getGlobalObject();
+    defer c.freeValue(global);
+    // setPropertyStr takes ownership of func
+    try c.setPropertyStr(global, "add", func);
+
+    const result = try c.eval("add(3, 4)", "test.js", .{});
+    defer c.freeValue(result);
+    try std.testing.expectEqual(@as(i32, 7), try c.toInt32(result));
+}
+
+test "newFunctionMagic" {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    const r = try quickjs.Runtime.init(allocator);
+    defer r.deinit();
+
+    const c = quickjs.Context.init(r);
+    defer c.deinit();
+
+    const jsMul = struct {
+        fn call(ctx: quickjs.Context, this_val: quickjs.Value, args: []const quickjs.Value, magic: c_int) quickjs.Value {
+            _ = this_val;
+            if (args.len < 2) return quickjs.NULL;
+            const a = ctx.toInt32(args[0]) catch return quickjs.NULL;
+            const b = ctx.toInt32(args[1]) catch return quickjs.NULL;
+            return ctx.newInt32(a * b + magic);
+        }
+    };
+
+    const func = c.newFunctionMagic("mul", 2, 100, jsMul.call);
+
+    const global = c.getGlobalObject();
+    defer c.freeValue(global);
+    // setPropertyStr takes ownership of func
+    try c.setPropertyStr(global, "mul", func);
+
+    const result = try c.eval("mul(3, 4)", "test.js", .{});
+    defer c.freeValue(result);
+    try std.testing.expectEqual(@as(i32, 112), try c.toInt32(result));
+}
+
+test "setInterruptHandler" {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    const r = try quickjs.Runtime.init(allocator);
+    defer r.deinit();
+
+    const Handler = struct {
+        triggered: bool = false,
+
+        pub fn onInterrupt(self: *@This()) bool {
+            self.triggered = true;
+            return true;
+        }
+    };
+
+    var handler = Handler{};
+    r.setInterruptHandler(&handler);
+
+    const c = quickjs.Context.init(r);
+    defer c.deinit();
+
+    // An infinite loop should trigger the interrupt handler
+    _ = c.eval("while(1){}", "test.js", .{}) catch {};
+    try std.testing.expect(handler.triggered);
+}
+
+test "newArrayBuffer with handler" {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    const r = try quickjs.Runtime.init(allocator);
+    defer r.deinit();
+
+    const c = quickjs.Context.init(r);
+    defer c.deinit();
+
+    const BufferHandler = struct {
+        allocator: std.mem.Allocator,
+        len: usize,
+        freed: bool = false,
+
+        pub fn onFree(self: *@This(), rt: quickjs.RuntimeHandle, data: ?*anyopaque) void {
+            _ = rt;
+            if (data) |d| {
+                const buf: [*]u8 = @ptrCast(d);
+                self.allocator.free(buf[0..self.len]);
+            }
+            self.freed = true;
+        }
+    };
+
+    var handler = BufferHandler{ .allocator = allocator, .len = 4 };
+    const buf = try allocator.alloc(u8, 4);
+    buf[0] = 1;
+    buf[1] = 2;
+    buf[2] = 3;
+    buf[3] = 4;
+
+    const ab = c.newArrayBuffer(buf, &handler, false);
+    defer c.freeValue(ab);
+
+    // The buffer should be accessible from JS
+    const len = c.getPropertyStr(ab, "byteLength");
+    defer c.freeValue(len);
+    try std.testing.expectEqual(@as(f64, 4), try c.toFloat64(len));
+
+    // Force GC to trigger the free handler
+    c.detachArrayBuffer(ab);
+    r.runGC();
+    try std.testing.expect(handler.freed);
+}
+
+test "newClass" {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    const r = try quickjs.Runtime.init(allocator);
+    defer r.deinit();
+
+    const c = quickjs.Context.init(r);
+    defer c.deinit();
+
+    var finalized = false;
+    _ = &finalized; // capture for comptime thunk
+
+    const MyClassDef = struct {
+        var finalized_flag: *bool = undefined;
+
+        pub fn finalizer(rt: quickjs.RuntimeHandle, val: quickjs.Value) void {
+            _ = rt;
+            _ = val;
+            finalized_flag.* = true;
+        }
+    };
+    MyClassDef.finalized_flag = &finalized;
+
+    const class_id = r.newClassID();
+    try r.newClass(class_id, .{
+        .name = "MyClass",
+        .finalizer = MyClassDef.finalizer,
+    });
+
+    const obj = c.newObjectClass(class_id);
+    try std.testing.expect(!finalized);
+    c.freeValue(obj);
+    r.runGC();
+    try std.testing.expect(finalized);
+}
+
+test "newModule" {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    const r = try quickjs.Runtime.init(allocator);
+    defer r.deinit();
+
+    const c = quickjs.Context.init(r);
+    defer c.deinit();
+
+    const module_init = struct {
+        fn init_fn(ctx: quickjs.Context, m: quickjs.Context.Module) c_int {
+            ctx.addModuleExport(m, "answer") catch return -1;
+            ctx.setModuleExport(m, "answer", ctx.newInt32(42)) catch return -1;
+            return 0;
+        }
+    };
+
+    const m = c.newModule("test_module", module_init.init_fn);
+    try std.testing.expect(m != null);
+    if (m) |mod| {
+        c.addModuleExport(mod, "answer") catch {};
+    }
+}

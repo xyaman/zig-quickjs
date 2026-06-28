@@ -1,7 +1,7 @@
 const std = @import("std");
 const c = @import("c");
 
-// pub const ClassID = u32;
+pub const ClassID = u32;
 
 pub const ArrayBuffer = struct {
     buffer: Value,
@@ -12,6 +12,54 @@ pub const ArrayBuffer = struct {
 
 pub const Atom = c.JSAtom;
 pub const Value = c.JSValue;
+
+/// A lightweight handle to a runtime, passed to callbacks that receive
+/// a `JSRuntime*` from C. Unlike `Runtime` (which is heap-allocated and
+/// owns the allocator), this is a value type that wraps the raw C pointer.
+pub const RuntimeHandle = struct {
+    ptr: ?*c.JSRuntime,
+
+    pub inline fn freeValue(self: RuntimeHandle, val: Value) void {
+        c.JS_FreeValueRT(self.ptr, val);
+    }
+
+    pub inline fn dupValue(self: RuntimeHandle, val: Value) Value {
+        return c.JS_DupValueRT(self.ptr, val);
+    }
+};
+
+/// A property enumeration entry, returned by `Context.getOwnPropertyNames`.
+pub const PropertyEnum = extern struct {
+    is_enumerable: bool,
+    atom: Atom,
+};
+
+/// GC marker passed to class `gc_mark` callbacks. Call `mark` for each
+/// reachable `Value` to prevent it from being collected.
+pub const Marker = struct {
+    rt: ?*c.JSRuntime,
+    func: c.JS_MarkFunc,
+
+    pub inline fn mark(self: Marker, val: Value) void {
+        c.JS_MarkValue(self.rt, val, self.func);
+    }
+};
+
+/// Definition for a custom class, passed to `Runtime.newClass`.
+/// All callbacks are optional — set to `null` if not needed.
+pub const ClassDef = struct {
+    name: [*:0]const u8,
+    finalizer: ?*const fn (RuntimeHandle, Value) void = null,
+    gc_mark: ?*const fn (RuntimeHandle, Value, Marker) void = null,
+    call: ?*const fn (Context, Value, Value, []const Value, c_int) Value = null,
+};
+
+pub const PromiseHookType = enum(c_int) {
+    Init = c.JS_PROMISE_HOOK_INIT,
+    Before = c.JS_PROMISE_HOOK_BEFORE,
+    After = c.JS_PROMISE_HOOK_AFTER,
+    Resolve = c.JS_PROMISE_HOOK_RESOLVE,
+};
 
 pub const NULL = Value{ .tag = c.JS_TAG_NULL, .u = .{ .int32 = 0 } };
 pub const UNDEFINED = Value{ .tag = c.JS_TAG_UNDEFINED, .u = .{ .int32 = 0 } };
@@ -37,8 +85,45 @@ pub const TypedArrayType = enum(c_int) {
     _,
 };
 
+pub inline fn getVersion() [*:0]const u8 {
+    return c.JS_GetVersion();
+}
+
+pub inline fn newRuntime() ?*c.JSRuntime {
+    return c.JS_NewRuntime();
+}
+
 const S = @sizeOf(usize);
 const H = @max(8, S);
+
+fn makeFinalizerThunk(comptime f: *const fn (RuntimeHandle, Value) void) ?*const c.JSClassFinalizer {
+    const Thunk = struct {
+        fn call(rt: ?*c.JSRuntime, val: c.JSValue) callconv(.c) void {
+            f(.{ .ptr = rt }, val);
+        }
+    };
+    return @ptrCast(&Thunk.call);
+}
+
+fn makeGcMarkThunk(comptime gm: *const fn (RuntimeHandle, Value, Marker) void) ?*const c.JSClassGCMark {
+    const Thunk = struct {
+        fn call(rt: ?*c.JSRuntime, val: c.JSValue, mark_func: c.JS_MarkFunc) callconv(.c) void {
+            gm(.{ .ptr = rt }, val, .{ .rt = rt, .func = mark_func });
+        }
+    };
+    return @ptrCast(&Thunk.call);
+}
+
+fn makeCallThunk(comptime cl: *const fn (Context, Value, Value, []const Value, c_int) Value) ?*const c.JSClassCall {
+    const Thunk = struct {
+        fn call(ctx: ?*c.JSContext, func_obj: c.JSValue, this_val: c.JSValue, argc: c_int, argv: [*c]c.JSValue, flags: c_int) callconv(.c) c.JSValue {
+            const ctx_wrapper = Context{ .ptr = ctx };
+            const args: []const Value = @as([*]const Value, @ptrCast(argv))[0..@as(usize, @intCast(argc))];
+            return cl(ctx_wrapper, func_obj, this_val, args, flags);
+        }
+    };
+    return @ptrCast(&Thunk.call);
+}
 
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
@@ -152,10 +237,6 @@ pub const Runtime = struct {
         return c.JS_IsLiveObject(self.ptr, obj);
     }
 
-    pub inline fn markValue(self: *const Runtime, val: Value, mark_func: c.JS_MarkFunc) void {
-        c.JS_MarkValue(self.ptr, val, mark_func);
-    }
-
     pub inline fn freeValue(self: *const Runtime, val: Value) void {
         c.JS_FreeValueRT(self.ptr, val);
     }
@@ -164,33 +245,47 @@ pub const Runtime = struct {
         return c.JS_DupValueRT(self.ptr, val);
     }
 
-    // pub inline fn newClassID(self: Runtime) !ClassID {
-    //     var class_id: ClassID = c.JS_INVALID_CLASS_ID;
-    //     if (c.JS_NewClassID(self.ptr, &class_id) == 0)
-    //         return error.ClassIDFailed;
+    pub inline fn dupAtom(self: *const Runtime, atom: Atom) Atom {
+        return c.JS_DupAtomRT(self.ptr, atom);
+    }
 
-    //     return class_id;
-    // }
+    pub inline fn freeAtom(self: *const Runtime, atom: Atom) void {
+        c.JS_FreeAtomRT(self.ptr, atom);
+    }
 
-    // pub inline fn isRegisteredClass(self: Runtime, class_id: ClassID) bool {
-    //     return c.JS_IsRegisteredClass(self.ptr, class_id);
-    // }
+    pub inline fn freeCString(self: *const Runtime, ptr: [*:0]const u8) void {
+        c.JS_FreeCStringRT(self.ptr, ptr);
+    }
 
-    // pub const ClassFinalizer = fn (?*Runtime, Value) void;
-    // // pub const MarkFunc = fn (?*Runtime, ?*GCObjectHeader) void;
-    // // pub const GCMark = fn (?*Runtime, Value, ?*const MarkFunc) void;
-    // pub const ClassDef = struct {
-    //     class_name: [*:0]const u8 = null,
-    //     finalizer: ?*const ClassFinalizer = null,
-    //     // gc_mark: ?*const JSClassGCMark = @import("std").mem.zeroes(?*const JSClassGCMark),
-    //     // call: ?*const JSClassCall = @import("std").mem.zeroes(?*const JSClassCall),
-    //     // exotic: [*c]JSClassExoticMethods = @import("std").mem.zeroes([*c]JSClassExoticMethods),
-    // };
+    pub inline fn freeCStringUTF16(self: *const Runtime, ptr: [*:0]const u16) void {
+        c.JS_FreeCStringRT_UTF16(self.ptr, ptr);
+    }
 
-    // pub inline fn newClass(self: Runtime, class_id: ClassID, class_def: *const c.JSClassDef) !void {
-    //     if (c.JS_NewClass(self.ptr, class_id, class_def) < 0)
-    //         return error.NewClassFailed;
-    // }
+    pub inline fn newClassID(self: *const Runtime) ClassID {
+        var class_id: ClassID = 0;
+        _ = c.JS_NewClassID(self.ptr, &class_id);
+        return class_id;
+    }
+
+    pub inline fn isRegisteredClass(self: *const Runtime, class_id: ClassID) bool {
+        return c.JS_IsRegisteredClass(self.ptr, class_id);
+    }
+
+    pub fn newClass(self: *const Runtime, class_id: ClassID, comptime def: ClassDef) !void {
+        const c_def = c.JSClassDef{
+            .class_name = def.name,
+            .finalizer = if (def.finalizer) |f| makeFinalizerThunk(f) else null,
+            .gc_mark = if (def.gc_mark) |gm| makeGcMarkThunk(gm) else null,
+            .call = if (def.call) |cl| makeCallThunk(cl) else null,
+            .exotic = null,
+        };
+        if (c.JS_NewClass(self.ptr, class_id, &c_def) < 0)
+            return error.NewClassFailed;
+    }
+
+    pub inline fn getClassName(self: *const Runtime, class_id: ClassID) Atom {
+        return c.JS_GetClassName(self.ptr, class_id);
+    }
 
     // Job queue management
     pub inline fn isJobPending(self: *const Runtime) bool {
@@ -299,39 +394,107 @@ pub const Runtime = struct {
         }, self.ptr);
     }
 
-    // Shared ArrayBuffer support
-    // pub inline fn setSharedArrayBufferFunctions(self: Runtime, functions: *const c.JSSharedArrayBufferFunctions) void {
-    //     c.JS_SetSharedArrayBufferFunctions(self.ptr, functions);
-    // }
+    /// Set an interrupt handler. The handler struct must have an `onInterrupt` method
+    /// that returns `bool` (true to interrupt execution).
+    /// The handler pointer must outlive the runtime.
+    pub fn setInterruptHandler(self: *const Runtime, handler: anytype) void {
+        const Handler = @TypeOf(handler);
+        const trampoline = struct {
+            fn call(_: ?*c.JSRuntime, opaque_ptr: ?*anyopaque) callconv(.c) c_int {
+                const h: Handler = @ptrCast(@alignCast(opaque_ptr));
+                return if (h.onInterrupt()) 1 else 0;
+            }
+        };
+        c.JS_SetInterruptHandler(self.ptr, @ptrCast(&trampoline.call), @ptrCast(handler));
+    }
 
-    // Host callbacks
-    // pub inline fn setInterruptHandler(self: Runtime, cb: ?c.JSInterruptHandler, ptr: ?*anyopaque) void {
-    //     c.JS_SetInterruptHandler(self.ptr, cb, ptr);
-    // }
+    /// Set a promise rejection tracker. The handler struct must have an `onRejection` method
+    /// with signature `fn(self, ctx: Context, promise: Value, reason: Value, is_handled: bool) void`.
+    /// The handler pointer must outlive the runtime.
+    pub fn setHostPromiseRejectionTracker(self: *const Runtime, handler: anytype) void {
+        const Handler = @TypeOf(handler);
+        const trampoline = struct {
+            fn call(ctx: ?*c.JSContext, promise: c.JSValue, reason: c.JSValue, is_handled: bool, opaque_ptr: ?*anyopaque) callconv(.c) void {
+                const h: Handler = @ptrCast(@alignCast(opaque_ptr));
+                h.onRejection(Context{ .ptr = ctx }, promise, reason, is_handled);
+            }
+        };
+        c.JS_SetHostPromiseRejectionTracker(self.ptr, @ptrCast(&trampoline.call), @ptrCast(handler));
+    }
+
+    /// Set a promise hook. The handler struct must have an `onPromiseHook` method
+    /// with signature `fn(self, ctx: Context, hook_type: PromiseHookType, promise: Value, parent: Value) void`.
+    /// The handler pointer must outlive the runtime.
+    pub fn setPromiseHook(self: *const Runtime, handler: anytype) void {
+        const Handler = @TypeOf(handler);
+        const trampoline = struct {
+            fn call(ctx: ?*c.JSContext, hook_type: c.JSPromiseHookType, promise: c.JSValue, parent_promise: c.JSValue, opaque_ptr: ?*anyopaque) callconv(.c) void {
+                const h: Handler = @ptrCast(@alignCast(opaque_ptr));
+                h.onPromiseHook(Context{ .ptr = ctx }, @enumFromInt(hook_type), promise, parent_promise);
+            }
+        };
+        c.JS_SetPromiseHook(self.ptr, @ptrCast(&trampoline.call), @ptrCast(handler));
+    }
+
+    /// Set a module loader. The handler struct must have an `onLoadModule` method
+    /// with signature `fn(self, ctx: Context, name: []const u8) ?Module`.
+    /// It may optionally have an `onNormalize` method
+    /// with signature `fn(self, ctx: Context, base_name: []const u8, module_name: []const u8) ?[:0]u8`.
+    /// The handler pointer must outlive the runtime.
+    pub fn setModuleLoader(self: *const Runtime, handler: anytype) void {
+        const Handler = @TypeOf(handler);
+
+        const loader_trampoline = struct {
+            fn call(ctx: ?*c.JSContext, module_name: [*c]const u8, opaque_ptr: ?*anyopaque) callconv(.c) ?*c.JSModuleDef {
+                const h: Handler = @ptrCast(@alignCast(opaque_ptr));
+                const name_len = std.mem.len(module_name);
+                const result = h.onLoadModule(Context{ .ptr = ctx }, module_name[0..name_len]);
+                return if (result) |m| m.ptr else null;
+            }
+        };
+
+        const has_normalize = @hasDecl(std.meta.Child(Handler), "onNormalize");
+        const normalize_ptr: ?*const c.JSModuleNormalizeFunc = if (has_normalize) blk: {
+            const trampoline = struct {
+                fn call(ctx: ?*c.JSContext, module_base_name: [*c]const u8, module_name: [*c]const u8, opaque_ptr: ?*anyopaque) callconv(.c) [*c]u8 {
+                    const h: Handler = @ptrCast(@alignCast(opaque_ptr));
+                    const base_len = std.mem.len(module_base_name);
+                    const name_len = std.mem.len(module_name);
+                    const result = h.onNormalize(Context{ .ptr = ctx }, module_base_name[0..base_len], module_name[0..name_len]);
+                    return if (result) |s| s.ptr else null;
+                }
+            };
+            break :blk @ptrCast(&trampoline.call);
+        } else null;
+
+        c.JS_SetModuleLoaderFunc(self.ptr, normalize_ptr, @ptrCast(&loader_trampoline.call), @ptrCast(handler));
+    }
+
+    /// Add a runtime finalizer. The handler struct must have an `onFinalize` method
+    /// with signature `fn(self) void`.
+    /// The handler pointer must outlive the runtime.
+    pub fn addRuntimeFinalizer(self: *const Runtime, handler: anytype) !void {
+        const Handler = @TypeOf(handler);
+        const trampoline = struct {
+            fn call(rt: ?*c.JSRuntime, opaque_ptr: ?*anyopaque) callconv(.c) void {
+                _ = rt;
+                const h: Handler = @ptrCast(@alignCast(opaque_ptr));
+                h.onFinalize();
+            }
+        };
+        const ret = c.JS_AddRuntimeFinalizer(self.ptr, @ptrCast(&trampoline.call), @ptrCast(handler));
+        if (ret < 0) return error.AddFinalizerFailed;
+    }
+
+    pub inline fn getPendingJobContext(self: *const Runtime) ?Context {
+        const ctx = c.JS_GetPendingJobContext(self.ptr);
+        if (ctx == null) return null;
+        return Context{ .ptr = ctx };
+    }
 
     pub inline fn setCanBlock(self: *const Runtime, can_block: bool) void {
         c.JS_SetCanBlock(self.ptr, can_block);
     }
-
-    // pub inline fn setHostPromiseRejectionTracker(self: Runtime, cb: ?c.JSHostPromiseRejectionTracker, ptr: ?*anyopaque) void {
-    //     c.JS_SetHostPromiseRejectionTracker(self.ptr, cb, ptr);
-    // }
-
-    // Module system
-    // pub inline fn setModuleLoaderFunc(
-    //     self: Runtime,
-    //     module_normalize: ?c.JSModuleNormalizeFunc,
-    //     module_loader: ?c.JSModuleLoaderFunc,
-    //     ptr: ?*anyopaque,
-    // ) void {
-    //     c.JS_SetModuleLoaderFunc(self.ptr, module_normalize, module_loader, ptr);
-    // }
-
-    // Runtime finalizer
-    // pub inline fn addRuntimeFinalizer(self: Runtime, finalizer: c.JSRuntimeFinalizer, arg: ?*anyopaque) !void {
-    //     const ret = c.JS_AddRuntimeFinalizer(self.ptr, finalizer, arg);
-    //     if (ret < 0) return error.AddFinalizerFailed;
-    // }
 };
 
 pub const Context = struct {
@@ -341,13 +504,29 @@ pub const Context = struct {
         return .{ .ptr = c.JS_NewContext(runtime.ptr) };
     }
 
+    pub inline fn initRaw(runtime: *const Runtime) Context {
+        return .{ .ptr = c.JS_NewContextRaw(runtime.ptr) };
+    }
+
     pub inline fn deinit(self: Context) void {
         c.JS_FreeContext(self.ptr);
     }
 
-    // pub inline fn getRuntime(self: Context) Runtime {
-    //     return .{ .ptr = c.JS_GetRuntime(self.ptr) };
-    // }
+    pub inline fn getRuntime(self: Context) ?*c.JSRuntime {
+        return c.JS_GetRuntime(self.ptr);
+    }
+
+    pub inline fn dupContext(self: Context) Context {
+        return .{ .ptr = c.JS_DupContext(self.ptr) };
+    }
+
+    pub inline fn getContextOpaque(self: Context) ?*anyopaque {
+        return c.JS_GetContextOpaque(self.ptr);
+    }
+
+    pub inline fn setContextOpaque(self: Context, ptr: ?*anyopaque) void {
+        c.JS_SetContextOpaque(self.ptr, ptr);
+    }
 
     pub inline fn isEqual(self: Context, a: Value, b: Value) bool {
         return c.JS_IsEqual(self.ptr, a, b);
@@ -371,13 +550,8 @@ pub const Context = struct {
         return c.JS_DupValue(self.ptr, value);
     }
 
-    pub inline fn newBool(_: Context, val: bool) Value {
-        return c.JSValue{
-            .tag = @as(i64, @bitCast(@as(c_longlong, c.JS_TAG_BOOL))),
-            .u = c.JSValueUnion{
-                .int32 = @as(c_int, @intFromBool(val)),
-            },
-        };
+    pub inline fn newBool(self: Context, val: bool) Value {
+        return c.JS_NewBool(self.ptr, val);
     }
 
     pub inline fn newInt32(self: Context, val: i32) Value {
@@ -396,8 +570,24 @@ pub const Context = struct {
         return c.JS_NewUint32(self.ptr, val);
     }
 
+    pub inline fn newUint64(self: Context, val: u64) Value {
+        return c.JS_NewUint64(self.ptr, val);
+    }
+
+    pub inline fn newNumber(self: Context, val: f64) Value {
+        return c.JS_NewNumber(self.ptr, val);
+    }
+
     pub inline fn newString(self: Context, str: []const u8) Value {
         return c.JS_NewStringLen(self.ptr, str.ptr, str.len);
+    }
+
+    pub inline fn newStringZ(self: Context, str: [*:0]const u8) Value {
+        return c.JS_NewString(self.ptr, str);
+    }
+
+    pub inline fn newStringUTF16(self: Context, buf: [*]const u16, len: usize) Value {
+        return c.JS_NewStringUTF16(self.ptr, buf, len);
     }
 
     pub inline fn newSymbol(self: Context, description: []const u8, is_global: bool) Value {
@@ -412,16 +602,32 @@ pub const Context = struct {
         return c.JS_NewObject(self.ptr);
     }
 
-    pub inline fn newObjectClass(self: Context, class_id: c.JSClassID) Value {
+    pub inline fn newObjectClass(self: Context, class_id: ClassID) Value {
         return c.JS_NewObjectClass(self.ptr, class_id);
     }
 
-    // pub inline fn newObjectProtoClass(self: Context, proto: Value, class_id: ClassID) Value {
-    //     return c.JS_NewObjectProtoClass(self.ptr, proto, class_id);
-    // }
+    pub inline fn newObjectProtoClass(self: Context, proto: Value, class_id: ClassID) Value {
+        return c.JS_NewObjectProtoClass(self.ptr, proto, class_id);
+    }
+
+    pub inline fn newObjectProto(self: Context, proto: Value) Value {
+        return c.JS_NewObjectProto(self.ptr, proto);
+    }
+
+    pub inline fn newObjectFrom(self: Context, count: c_int, props: [*]const Atom, values: [*]const Value) Value {
+        return c.JS_NewObjectFrom(self.ptr, count, props, values);
+    }
+
+    pub inline fn newObjectFromStr(self: Context, count: c_int, props: [*][*:0]const u8, values: [*]const Value) Value {
+        return c.JS_NewObjectFromStr(self.ptr, count, props, values);
+    }
 
     pub inline fn newArray(self: Context) Value {
         return c.JS_NewArray(self.ptr);
+    }
+
+    pub inline fn newArrayFrom(self: Context, values: []const Value) Value {
+        return c.JS_NewArrayFrom(self.ptr, @intCast(values.len), @constCast(values.ptr));
     }
 
     pub inline fn newDate(self: Context, epoch_ms: f64) Value {
@@ -434,6 +640,10 @@ pub const Context = struct {
 
     pub inline fn newBigUint64(self: Context, val: u64) Value {
         return c.JS_NewBigUint64(self.ptr, val);
+    }
+
+    pub inline fn newTypedArray(self: Context, args: []const Value, array_type: TypedArrayType) Value {
+        return c.JS_NewTypedArray(self.ptr, @intCast(args.len), @constCast(args.ptr), @intFromEnum(array_type));
     }
 
     // Value conversion methods
@@ -508,15 +718,40 @@ pub const Context = struct {
         return ptr[0..len :0];
     }
 
-    // pub inline fn toCStringOwned(self: Context, val: Value) ?[:0]const u8 {
-    //     var len: usize = undefined;
-    //     const str = c.JS_ToCStringLen(self.ptr, &len, val);
-    //     if (str == null) return null;
-    //     return str[0..len :0];
-    // }
+    pub inline fn toCStringLen2(self: Context, val: Value, cesu8: bool) ![:0]const u8 {
+        var len: usize = undefined;
+        const ptr = c.JS_ToCStringLen2(self.ptr, &len, val, cesu8) orelse
+            return error.Exception;
+        return ptr[0..len :0];
+    }
+
+    pub inline fn toCStringUTF16(self: Context, val: Value) ![:0]const u16 {
+        var len: usize = undefined;
+        const ptr = c.JS_ToCStringLenUTF16(self.ptr, &len, val);
+        if (ptr == null) return error.Exception;
+        return @as([*:0]const u16, @ptrCast(ptr))[0..len :0];
+    }
 
     pub inline fn freeCString(self: Context, ptr: [*:0]const u8) void {
         c.JS_FreeCString(self.ptr, ptr);
+    }
+
+    pub inline fn freeCStringUTF16(self: Context, ptr: [*:0]const u16) void {
+        c.JS_FreeCStringUTF16(self.ptr, ptr);
+    }
+
+    pub inline fn toIndex(self: Context, val: Value) !u64 {
+        var result: u64 = undefined;
+        const ret = c.JS_ToIndex(self.ptr, &result, val);
+        if (ret != 0) return error.Exception;
+        return result;
+    }
+
+    pub inline fn toInt64Ext(self: Context, val: Value) !i64 {
+        var result: i64 = undefined;
+        const ret = c.JS_ToInt64Ext(self.ptr, &result, val);
+        if (ret != 0) return error.Exception;
+        return result;
     }
 
     pub inline fn toPropertyKey(self: Context, val: Value) Value {
@@ -525,6 +760,10 @@ pub const Context = struct {
 
     pub inline fn toObject(self: Context, val: Value) Value {
         return c.JS_ToObject(self.ptr, val);
+    }
+
+    pub inline fn toObjectString(self: Context, val: Value) Value {
+        return c.JS_ToObjectString(self.ptr, val);
     }
 
     // Function, object, class, and prototype related methods
@@ -580,14 +819,6 @@ pub const Context = struct {
         return c.JS_IsPromise(self);
     }
 
-    pub inline fn isRegExp(_: Context, self: Value) bool {
-        return c.JS_IsRegExp(self);
-    }
-
-    pub inline fn isMap(_: Context, self: Value) bool {
-        return c.JS_IsMap(self);
-    }
-
     pub inline fn isProxy(_: Context, self: Value) bool {
         return c.JS_IsProxy(self);
     }
@@ -612,6 +843,46 @@ pub const Context = struct {
         return c.JS_IsBigInt(val);
     }
 
+    pub inline fn isAsyncFunction(_: Context, val: Value) bool {
+        return c.JS_IsAsyncFunction(val);
+    }
+
+    pub inline fn isDataView(_: Context, val: Value) bool {
+        return c.JS_IsDataView(val);
+    }
+
+    pub inline fn isSet(_: Context, val: Value) bool {
+        return c.JS_IsSet(val);
+    }
+
+    pub inline fn isWeakRef(_: Context, val: Value) bool {
+        return c.JS_IsWeakRef(val);
+    }
+
+    pub inline fn isWeakSet(_: Context, val: Value) bool {
+        return c.JS_IsWeakSet(val);
+    }
+
+    pub inline fn isWeakMap(_: Context, val: Value) bool {
+        return c.JS_IsWeakMap(val);
+    }
+
+    pub inline fn isRegExp(_: Context, val: Value) bool {
+        return c.JS_IsRegExp(val);
+    }
+
+    pub inline fn isMap(_: Context, val: Value) bool {
+        return c.JS_IsMap(val);
+    }
+
+    pub inline fn isNaN(_: Context, val: Value) bool {
+        return c.JS_VALUE_IS_NAN(val);
+    }
+
+    pub inline fn getClassID(_: Context, val: Value) ClassID {
+        return c.JS_GetClassID(val);
+    }
+
     pub inline fn getPrototype(self: Context, val: Value) Value {
         return c.JS_GetPrototype(self.ptr, val);
     }
@@ -622,18 +893,18 @@ pub const Context = struct {
     }
 
     pub inline fn getProxyTarget(self: Context, proxy: Value) Value {
-        return c.JS_GetProxyTarget(self.ptr, proxy.val);
+        return c.JS_GetProxyTarget(self.ptr, proxy);
     }
 
     pub inline fn getProxyHandler(self: Context, proxy: Value) Value {
-        return c.JS_GetProxyHandler(self.ptr, proxy.val);
+        return c.JS_GetProxyHandler(self.ptr, proxy);
+    }
+
+    pub inline fn newProxy(self: Context, target: Value, handler: Value) Value {
+        return c.JS_NewProxy(self.ptr, target, handler);
     }
 
     // Error handling
-    pub inline fn throwError(self: Context) Value {
-        return c.JS_NewError(self.ptr);
-    }
-
     pub inline fn throwTypeError(self: Context, fmt: [*:0]const u8) Value {
         return c.JS_ThrowTypeError(self.ptr, fmt);
     }
@@ -654,6 +925,14 @@ pub const Context = struct {
         return c.JS_ThrowInternalError(self.ptr, fmt);
     }
 
+    pub inline fn throwPlainError(self: Context, fmt: [*:0]const u8) Value {
+        return c.JS_ThrowPlainError(self.ptr, fmt);
+    }
+
+    pub inline fn throwDOMException(self: Context, name: [*:0]const u8, fmt: [*:0]const u8) Value {
+        return c.JS_ThrowDOMException(self.ptr, name, fmt);
+    }
+
     pub inline fn throwOutOfMemory(self: Context) Value {
         return c.JS_ThrowOutOfMemory(self.ptr);
     }
@@ -668,6 +947,52 @@ pub const Context = struct {
 
     pub inline fn hasException(self: Context) bool {
         return c.JS_HasException(self.ptr);
+    }
+
+    // Error construction (without throwing)
+    pub inline fn newError(self: Context) Value {
+        return c.JS_NewError(self.ptr);
+    }
+
+    pub inline fn newInternalError(self: Context, fmt: [*:0]const u8) Value {
+        return c.JS_NewInternalError(self.ptr, fmt);
+    }
+
+    pub inline fn newPlainError(self: Context, fmt: [*:0]const u8) Value {
+        return c.JS_NewPlainError(self.ptr, fmt);
+    }
+
+    pub inline fn newRangeError(self: Context, fmt: [*:0]const u8) Value {
+        return c.JS_NewRangeError(self.ptr, fmt);
+    }
+
+    pub inline fn newReferenceError(self: Context, fmt: [*:0]const u8) Value {
+        return c.JS_NewReferenceError(self.ptr, fmt);
+    }
+
+    pub inline fn newSyntaxError(self: Context, fmt: [*:0]const u8) Value {
+        return c.JS_NewSyntaxError(self.ptr, fmt);
+    }
+
+    pub inline fn newTypeError(self: Context, fmt: [*:0]const u8) Value {
+        return c.JS_NewTypeError(self.ptr, fmt);
+    }
+
+    // Uncatchable error API
+    pub inline fn isUncatchableError(_: Context, val: Value) bool {
+        return c.JS_IsUncatchableError(val);
+    }
+
+    pub inline fn setUncatchableError(self: Context, val: Value) void {
+        c.JS_SetUncatchableError(self.ptr, val);
+    }
+
+    pub inline fn clearUncatchableError(self: Context, val: Value) void {
+        c.JS_ClearUncatchableError(self.ptr, val);
+    }
+
+    pub inline fn resetUncatchableError(self: Context) void {
+        c.JS_ResetUncatchableError(self.ptr);
     }
 
     // Value lifecycle management
@@ -762,6 +1087,22 @@ pub const Context = struct {
         }
     }
 
+    pub inline fn evalThis(self: Context, this_obj: Value, input: []const u8, filename: [*:0]const u8, flags: EvalFlags) error{Exception}!Value {
+        var c_flags: c_int = 0;
+        switch (flags.type) {
+            .global => c_flags |= c.JS_EVAL_TYPE_GLOBAL,
+            .module => c_flags |= c.JS_EVAL_TYPE_MODULE,
+        }
+        if (flags.strict) c_flags |= c.JS_EVAL_FLAG_STRICT;
+        if (flags.compile_only) c_flags |= c.JS_EVAL_FLAG_COMPILE_ONLY;
+        if (flags.backtrace_barrier) c_flags |= c.JS_EVAL_FLAG_BACKTRACE_BARRIER;
+        if (flags.async) c_flags |= c.JS_EVAL_FLAG_ASYNC;
+
+        const result = c.JS_EvalThis(self.ptr, this_obj, input.ptr, input.len, filename, c_flags);
+        if (c.JS_IsException(result)) return error.Exception;
+        return result;
+    }
+
     pub inline fn getGlobalObject(self: Context) Value {
         return c.JS_GetGlobalObject(self.ptr);
     }
@@ -776,8 +1117,16 @@ pub const Context = struct {
         return c.JS_Call(self.ptr, func_obj, this_obj, @intCast(args.len), @constCast(args.ptr));
     }
 
+    pub inline fn invoke(self: Context, this_val: Value, atom: Atom, args: []const Value) Value {
+        return c.JS_Invoke(self.ptr, this_val, atom, @intCast(args.len), @constCast(args.ptr));
+    }
+
     pub inline fn callConstructor(self: Context, func_obj: Value, args: []const Value) Value {
         return c.JS_CallConstructor(self.ptr, func_obj, @intCast(args.len), args.ptr);
+    }
+
+    pub inline fn callConstructor2(self: Context, func_obj: Value, new_target: Value, args: []const Value) Value {
+        return c.JS_CallConstructor2(self.ptr, func_obj, new_target, @intCast(args.len), @constCast(args.ptr));
     }
 
     // ArrayBuffer related methods
@@ -788,9 +1137,19 @@ pub const Context = struct {
         return ptr[0..size];
     }
 
-    // pub inline fn newArrayBuffer(self: Context, buf: []u8, free_func: ?c.JSFreeArrayBufferDataFunc, ptr: ?*anyopaque, is_shared: bool) Value {
-    //     return c.JS_NewArrayBuffer(self.ptr, buf.ptr, buf.len, free_func, ptr, is_shared);
-    // }
+    /// Create an ArrayBuffer backed by `buf`. QuickJS takes ownership of the buffer.
+    /// When the buffer is no longer needed, `handler.onFree(rt: RuntimeHandle, data: ?*anyopaque) void`
+    /// is called, where `data` is the buffer pointer. The handler pointer must outlive the array buffer.
+    pub fn newArrayBuffer(self: Context, buf: []u8, handler: anytype, is_shared: bool) Value {
+        const Handler = @TypeOf(handler);
+        const trampoline = struct {
+            fn call(rt: ?*c.JSRuntime, opaque_ptr: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+                const h: Handler = @ptrCast(@alignCast(opaque_ptr));
+                h.onFree(.{ .ptr = rt }, data);
+            }
+        };
+        return c.JS_NewArrayBuffer(self.ptr, buf.ptr, buf.len, @ptrCast(&trampoline.call), @ptrCast(handler), is_shared);
+    }
 
     pub inline fn newArrayBufferCopy(self: Context, buf: []const u8) Value {
         return c.JS_NewArrayBufferCopy(self.ptr, buf.ptr, buf.len);
@@ -800,6 +1159,14 @@ pub const Context = struct {
         c.JS_DetachArrayBuffer(self.ptr, obj);
     }
 
+    pub inline fn isImmutableArrayBuffer(_: Context, obj: Value) bool {
+        return c.JS_IsImmutableArrayBuffer(obj) != 0;
+    }
+
+    pub inline fn setImmutableArrayBuffer(_: Context, obj: Value, immutable: bool) c_int {
+        return c.JS_SetImmutableArrayBuffer(obj, immutable);
+    }
+
     pub inline fn getUint8Array(self: Context, obj: Value) ![]u8 {
         var size: usize = undefined;
         const ptr = c.JS_GetUint8Array(self.ptr, &size, obj);
@@ -807,9 +1174,19 @@ pub const Context = struct {
         return ptr[0..size];
     }
 
-    // pub inline fn newUint8Array(self: Context, buf: []u8, free_func: ?c.JSFreeArrayBufferDataFunc, ptr: ?*anyopaque, is_shared: bool) Value {
-    //     return c.JS_NewUint8Array(self.ptr, buf.ptr, buf.len, free_func, ptr, is_shared);
-    // }
+    /// Create a Uint8Array backed by `buf`. QuickJS takes ownership of the buffer.
+    /// When the buffer is no longer needed, `handler.onFree(rt: RuntimeHandle, data: ?*anyopaque) void`
+    /// is called, where `data` is the buffer pointer. The handler pointer must outlive the array buffer.
+    pub fn newUint8Array(self: Context, buf: []u8, handler: anytype, is_shared: bool) Value {
+        const Handler = @TypeOf(handler);
+        const trampoline = struct {
+            fn call(rt: ?*c.JSRuntime, opaque_ptr: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+                const h: Handler = @ptrCast(@alignCast(opaque_ptr));
+                h.onFree(.{ .ptr = rt }, data);
+            }
+        };
+        return c.JS_NewUint8Array(self.ptr, buf.ptr, buf.len, @ptrCast(&trampoline.call), @ptrCast(handler), is_shared);
+    }
 
     pub inline fn newUint8ArrayCopy(self: Context, buf: []const u8) Value {
         return c.JS_NewUint8ArrayCopy(self.ptr, buf.ptr, buf.len);
@@ -853,6 +1230,14 @@ pub const Context = struct {
         return c.JS_PromiseResult(self.ptr, promise);
     }
 
+    pub inline fn newPromiseCapability(self: Context, resolving_funcs: [*]Value) Value {
+        return c.JS_NewPromiseCapability(self.ptr, @ptrCast(resolving_funcs));
+    }
+
+    pub inline fn newSettledPromise(self: Context, is_reject: bool, value: Value) Value {
+        return c.JS_NewSettledPromise(self.ptr, is_reject, value);
+    }
+
     // JSON methods
     pub inline fn parseJSON(self: Context, buf: []const u8, filename: [*:0]const u8) Value {
         return c.JS_ParseJSON(self.ptr, buf.ptr, buf.len, filename);
@@ -865,6 +1250,10 @@ pub const Context = struct {
     // Atom handling
     pub inline fn newAtom(self: Context, str: []const u8) Atom {
         return c.JS_NewAtomLen(self.ptr, str.ptr, str.len);
+    }
+
+    pub inline fn newAtomZ(self: Context, str: [*:0]const u8) Atom {
+        return c.JS_NewAtom(self.ptr, str);
     }
 
     pub inline fn newAtomUint32(self: Context, n: u32) Atom {
@@ -891,6 +1280,13 @@ pub const Context = struct {
         return c.JS_AtomToCString(self.ptr, atom) orelse return error.Exception;
     }
 
+    pub inline fn atomToCStringLen(self: Context, atom: Atom) ![:0]const u8 {
+        var len: usize = undefined;
+        const ptr = c.JS_AtomToCStringLen(self.ptr, &len, atom);
+        if (ptr == null) return error.Exception;
+        return @as([*:0]const u8, @ptrCast(ptr))[0..len :0];
+    }
+
     pub inline fn valueToAtom(self: Context, val: Value) Atom {
         return c.JS_ValueToAtom(self.ptr, val);
     }
@@ -904,36 +1300,26 @@ pub const Context = struct {
         set_enum: bool = false,
     };
 
-    // pub const PropertyEnum = packed struct {
-    //     is_enumerable: bool,
-    //     atom: Atom,
-    // };
+    pub inline fn getOwnPropertyNames(self: Context, obj: Value, flags: PropertyEnumFlags) ![]PropertyEnum {
+        var c_flags: c_int = 0;
+        if (flags.strings) c_flags |= c.JS_GPN_STRING_MASK;
+        if (flags.symbols) c_flags |= c.JS_GPN_SYMBOL_MASK;
+        if (flags.private) c_flags |= c.JS_GPN_PRIVATE_MASK;
+        if (flags.enum_only) c_flags |= c.JS_GPN_ENUM_ONLY;
+        if (flags.set_enum) c_flags |= c.JS_GPN_SET_ENUM;
 
-    // typedef struct JSPropertyEnum {
-    //     bool is_enumerable;
-    //     JSAtom atom;
-    // } JSPropertyEnum;
+        var ptab: [*c]PropertyEnum = undefined;
+        var len: u32 = 0;
 
-    // pub inline fn getOwnPropertyNames(self: Context, obj: Value, flags: PropertyEnumFlags) ![]const c.JSPropertyEnum {
-    //     var c_flags: c_int = 0;
-    //     if (flags.strings) c_flags |= c.JS_GPN_STRING_MASK;
-    //     if (flags.symbols) c_flags |= c.JS_GPN_SYMBOL_MASK;
-    //     if (flags.private) c_flags |= c.JS_GPN_PRIVATE_MASK;
-    //     if (flags.enum_only) c_flags |= c.JS_GPN_ENUM_ONLY;
-    //     if (flags.set_enum) c_flags |= c.JS_GPN_SET_ENUM;
+        const ret = c.JS_GetOwnPropertyNames(self.ptr, @ptrCast(&ptab), &len, obj, c_flags);
+        if (ret < 0) return error.Exception;
 
-    //     var ptab: [*c]c.JSPropertyEnum = undefined;
-    //     var len: u32 = 0;
+        return ptab[0..len];
+    }
 
-    //     const ret = c.JS_GetOwnPropertyNames(self.ptr, &ptab, &len, obj, c_flags);
-    //     if (ret < 0) return error.Exception;
-
-    //     return ptab[0..len];
-    // }
-
-    // pub inline fn freePropertyEnum(self: Context, tab: []const c.JSPropertyEnum) void {
-    //     c.JS_FreePropertyEnum(self.ptr, @constCast(tab.ptr), @intCast(tab.len));
-    // }
+    pub inline fn freePropertyEnum(self: Context, tab: []PropertyEnum) void {
+        c.JS_FreePropertyEnum(self.ptr, @ptrCast(tab.ptr), @intCast(tab.len));
+    }
 
     // Property descriptor structure
 
@@ -997,6 +1383,32 @@ pub const Context = struct {
         const ret = c.JS_PreventExtensions(self.ptr, obj);
         if (ret < 0) return error.Exception;
         return ret != 0;
+    }
+
+    pub inline fn getLength(self: Context, obj: Value) !i64 {
+        var result: i64 = undefined;
+        const ret = c.JS_GetLength(self.ptr, obj, &result);
+        if (ret < 0) return error.Exception;
+        return result;
+    }
+
+    pub inline fn setLength(self: Context, obj: Value, len: i64) !void {
+        const ret = c.JS_SetLength(self.ptr, obj, len);
+        if (ret < 0) return error.Exception;
+    }
+
+    pub inline fn sealObject(self: Context, obj: Value) !void {
+        const ret = c.JS_SealObject(self.ptr, obj);
+        if (ret < 0) return error.Exception;
+    }
+
+    pub inline fn freezeObject(self: Context, obj: Value) !void {
+        const ret = c.JS_FreezeObject(self.ptr, obj);
+        if (ret < 0) return error.Exception;
+    }
+
+    pub inline fn setIsHTMLDDA(self: Context, obj: Value) void {
+        c.JS_SetIsHTMLDDA(self.ptr, obj);
     }
 
     pub const DefinePropertyFlags = packed struct {
@@ -1063,27 +1475,30 @@ pub const Context = struct {
         return ret != 0;
     }
 
-    // pub inline fn setOpaque(_: Context, obj: Value, ptr: ?*anyopaque) !void {
-    //     if (c.JS_SetOpaque(obj, ptr) < 0)
-    //         return error.OpaqueSetFailed;
-    // }
+    pub inline fn setOpaque(_: Context, obj: Value, ptr: ?*anyopaque) c_int {
+        return c.JS_SetOpaque(obj, ptr);
+    }
 
-    // pub inline fn getOpaque(_: Context, obj: Value, class_id: ClassID) ?*anyopaque {
-    //     return c.JS_GetOpaque(obj, class_id);
-    // }
+    pub inline fn getOpaque(_: Context, obj: Value, class_id: ClassID) ?*anyopaque {
+        return c.JS_GetOpaque(obj, class_id);
+    }
 
-    // pub inline fn getOpaque2(self: Context, obj: Value, class_id: ClassID) ?*anyopaque {
-    //     return c.JS_GetOpaque2(self.ptr, obj, class_id);
-    // }
+    pub inline fn getOpaque2(self: Context, obj: Value, class_id: ClassID) ?*anyopaque {
+        return c.JS_GetOpaque2(self.ptr, obj, class_id);
+    }
 
-    // // Class and prototype handling
-    // pub inline fn setClassProto(self: Context, class_id: ClassID, proto: Value) void {
-    //     c.JS_SetClassProto(self.ptr, class_id, proto);
-    // }
+    pub inline fn getAnyOpaque(_: Context, obj: Value, class_id: *ClassID) ?*anyopaque {
+        return c.JS_GetAnyOpaque(obj, class_id);
+    }
 
-    // pub inline fn getClassProto(self: Context, class_id: ClassID) Value {
-    //     return c.JS_GetClassProto(self.ptr, class_id);
-    // }
+    // Class and prototype handling
+    pub inline fn setClassProto(self: Context, class_id: ClassID, proto: Value) void {
+        c.JS_SetClassProto(self.ptr, class_id, proto);
+    }
+
+    pub inline fn getClassProto(self: Context, class_id: ClassID) Value {
+        return c.JS_GetClassProto(self.ptr, class_id);
+    }
 
     pub inline fn getFunctionProto(self: Context) Value {
         return c.JS_GetFunctionProto(self.ptr);
@@ -1142,18 +1557,42 @@ pub const Context = struct {
         c.JS_AddPerformance(self.ptr);
     }
 
-    // // C function integration
-    // pub inline fn newCFunction(self: Context, func: c.JSCFunction, name: []const u8, length: c_int) Value {
-    //     return c.JS_NewCFunction(self.ptr, func, name.ptr, length);
-    // }
+    pub inline fn addIntrinsicAToB(self: Context) void {
+        c.JS_AddIntrinsicAToB(self.ptr);
+    }
 
-    // pub inline fn newCFunction2(self: Context, func: c.JSCFunction, name: []const u8, length: c_int, cproto: c.JSCFunctionEnum, magic: c_int) Value {
-    //     return c.JS_NewCFunction2(self.ptr, func, name.ptr, length, cproto, magic);
-    // }
+    pub inline fn addIntrinsicDOMException(self: Context) void {
+        c.JS_AddIntrinsicDOMException(self.ptr);
+    }
 
-    // pub inline fn newCFunctionMagic(self: Context, func: c.JSCFunctionMagic, name: []const u8, length: c_int, cproto: c.JSCFunctionEnum, magic: c_int) Value {
-    //     return c.JS_NewCFunctionMagic(self.ptr, func, name.ptr, length, cproto, magic);
-    // }
+    // Function integration
+
+    /// Create a JS function backed by a Zig callback.
+    /// The callback must have signature `fn(Context, Value, []const Value) Value`
+    /// where the params are (context, this_val, args).
+    pub fn newFunction(self: Context, name: [*:0]const u8, length: c_int, comptime callback: fn (Context, Value, []const Value) Value) Value {
+        const Thunk = struct {
+            fn call(ctx: ?*c.JSContext, this_val: c.JSValue, argc: c_int, argv: [*c]c.JSValue) callconv(.c) c.JSValue {
+                const ctx_wrapper = Context{ .ptr = ctx };
+                const args: []const Value = @as([*]const Value, @ptrCast(argv))[0..@as(usize, @intCast(argc))];
+                return callback(ctx_wrapper, this_val, args);
+            }
+        };
+        return c.JS_NewCFunction(self.ptr, @ptrCast(&Thunk.call), name, length);
+    }
+
+    /// Like `newFunction` but the callback also receives a `magic` int.
+    /// The callback must have signature `fn(Context, Value, []const Value, c_int) Value`.
+    pub fn newFunctionMagic(self: Context, name: [*:0]const u8, length: c_int, magic: c_int, comptime callback: fn (Context, Value, []const Value, c_int) Value) Value {
+        const Thunk = struct {
+            fn call(ctx: ?*c.JSContext, this_val: c.JSValue, argc: c_int, argv: [*c]c.JSValue, m: c_int) callconv(.c) c.JSValue {
+                const ctx_wrapper = Context{ .ptr = ctx };
+                const args: []const Value = @as([*]const Value, @ptrCast(argv))[0..@as(usize, @intCast(argc))];
+                return callback(ctx_wrapper, this_val, args, m);
+            }
+        };
+        return c.JS_NewCFunctionMagic(self.ptr, @ptrCast(&Thunk.call), name, length, c.JS_CFUNC_generic_magic, magic);
+    }
 
     pub inline fn setConstructor(self: Context, func_obj: Value, proto: Value) void {
         c.JS_SetConstructor(self.ptr, func_obj, proto);
@@ -1162,10 +1601,6 @@ pub const Context = struct {
     pub inline fn setConstructorBit(self: Context, func_obj: Value, val: bool) bool {
         return c.JS_SetConstructorBit(self.ptr, func_obj, val) != 0;
     }
-
-    // pub inline fn newCFunctionData(self: Context, func: c.JSCFunctionData, length: c_int, magic: c_int, data: []const Value) Value {
-    //     return c.JS_NewCFunctionData(self.ptr, func, length, magic, data.len, data.ptr);
-    // }
 
     // Module type
     pub const Module = struct {
@@ -1203,9 +1638,18 @@ pub const Context = struct {
         return c.JS_LoadModule(self.ptr, basename_ptr, filename.ptr);
     }
 
-    // C module creation helpers
-    pub inline fn newCModule(self: Context, name: []const u8, func: c.JSModuleInitFunc) ?Module {
-        const ptr = c.JS_NewCModule(self.ptr, name.ptr, func);
+    // Module creation
+
+    /// Create a native module. The init function is called when the module is instantiated.
+    /// The callback must have signature `fn(Context, Module) c_int` and should add exports
+    /// and return 0 on success.
+    pub fn newModule(self: Context, name: []const u8, comptime init_fn: fn (Context, Module) c_int) ?Module {
+        const Thunk = struct {
+            fn call(ctx: ?*c.JSContext, m: ?*c.JSModuleDef) callconv(.c) c_int {
+                return init_fn(Context{ .ptr = ctx }, Module{ .ptr = m.? });
+            }
+        };
+        const ptr = c.JS_NewCModule(self.ptr, name.ptr, @ptrCast(&Thunk.call));
         return if (ptr != null) Module{ .ptr = ptr.? } else null;
     }
 
@@ -1219,11 +1663,34 @@ pub const Context = struct {
         if (ret < 0) return error.ModuleExportFailed;
     }
 
-    // // Job queue management
-    // pub inline fn enqueueJob(self: Context, job_func: c.JSJobFunc, args: []const Value) !void {
-    //     const ret = c.JS_EnqueueJob(self.ptr, job_func, args.len, args.ptr);
-    //     if (ret < 0) return error.EnqueueJobFailed;
-    // }
+    pub inline fn getModulePrivateValue(self: Context, m: Module) Value {
+        return c.JS_GetModulePrivateValue(self.ptr, m.ptr);
+    }
+
+    pub inline fn setModulePrivateValue(self: Context, m: Module, val: Value) !void {
+        const ret = c.JS_SetModulePrivateValue(self.ptr, m.ptr, val);
+        if (ret < 0) return error.Exception;
+    }
+
+    pub inline fn detectModule(input: []const u8) bool {
+        return c.JS_DetectModule(input.ptr, input.len);
+    }
+
+    // Job queue management
+
+    /// Enqueue a job to be run on the microtask queue.
+    /// The callback must have signature `fn(Context, []const Value) Value`.
+    pub fn enqueueJob(self: Context, comptime callback: fn (Context, []const Value) Value, args: []const Value) !void {
+        const Thunk = struct {
+            fn call(ctx: ?*c.JSContext, argc: c_int, argv: [*c]c.JSValue) callconv(.c) c.JSValue {
+                const ctx_wrapper = Context{ .ptr = ctx };
+                const job_args: []const Value = @as([*]const Value, @ptrCast(argv))[0..@as(usize, @intCast(argc))];
+                return callback(ctx_wrapper, job_args);
+            }
+        };
+        const ret = c.JS_EnqueueJob(self.ptr, @ptrCast(&Thunk.call), @intCast(args.len), @constCast(args.ptr));
+        if (ret < 0) return error.EnqueueJobFailed;
+    }
 
     // Object serialization
     pub const WriteObjectFlags = packed struct {
