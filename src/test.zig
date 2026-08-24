@@ -1446,3 +1446,45 @@ test "allocator returns null on OOM instead of a panic" {
 
     try std.testing.expectError(error.Exception, result);
 }
+
+test "module loader resolves an import via moduleFromValue" {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    const r = try quickjs.Runtime.init(allocator);
+    defer r.deinit();
+
+    const c = quickjs.Context.init(r);
+    defer c.deinit();
+
+    const Loader = struct {
+        pub fn onLoadModule(_: *@This(), ctx: quickjs.Context, name: []const u8, attributes: quickjs.Value) ?quickjs.Context.Module {
+            _ = attributes;
+            if (!std.mem.eql(u8, name, "mathlib")) return null;
+            const val = ctx.eval(
+                "export const add = (a, b) => a + b;",
+                "mathlib",
+                .{ .type = .module, .compile_only = true },
+            ) catch return null;
+            return ctx.moduleFromValue(val);
+        }
+    };
+
+    var loader = Loader{};
+    r.setModuleLoader2(&loader);
+
+    const entry = c.eval(
+        "import { add } from \"mathlib\"; globalThis.result = add(2, 3);",
+        "entry",
+        .{ .type = .module },
+    ) catch |err| {
+        std.debug.print("entry eval failed: {}\n", .{err});
+        return err;
+    };
+    c.freeValue(entry);
+
+    const rv = try c.eval("globalThis.result", "read", .{});
+    defer c.freeValue(rv);
+    try std.testing.expectEqual(@as(i32, 5), try c.toInt32(rv));
+}

@@ -467,6 +467,47 @@ pub const Runtime = struct {
         c.JS_SetModuleLoaderFunc(self.ptr, normalize_ptr, @ptrCast(&loader_trampoline.call), @ptrCast(handler));
     }
 
+    pub fn setModuleLoader2(self: *const Runtime, handler: anytype) void {
+        const Handler = @TypeOf(handler);
+        const Child = std.meta.Child(Handler);
+
+        const loader_trampoline = struct {
+            fn call(ctx: ?*c.JSContext, module_name: [*c]const u8, opaque_ptr: ?*anyopaque, attributes: c.JSValue) callconv(.c) ?*c.JSModuleDef {
+                const h: Handler = @ptrCast(@alignCast(opaque_ptr));
+                const name_len = std.mem.len(module_name);
+                const result = h.onLoadModule(Context{ .ptr = ctx }, module_name[0..name_len], attributes);
+                return if (result) |m| m.ptr else null;
+            }
+        };
+
+        const has_normalize = @hasDecl(Child, "onNormalize");
+        const normalize_ptr: ?*const c.JSModuleNormalizeFunc = if (has_normalize) blk: {
+            const trampoline = struct {
+                fn call(ctx: ?*c.JSContext, module_base_name: [*c]const u8, module_name: [*c]const u8, opaque_ptr: ?*anyopaque) callconv(.c) [*c]u8 {
+                    const h: Handler = @ptrCast(@alignCast(opaque_ptr));
+                    const base_len = std.mem.len(module_base_name);
+                    const name_len = std.mem.len(module_name);
+                    const result = h.onNormalize(Context{ .ptr = ctx }, module_base_name[0..base_len], module_name[0..name_len]);
+                    return if (result) |s| s.ptr else null;
+                }
+            };
+            break :blk @ptrCast(&trampoline.call);
+        } else null;
+
+        const has_check = @hasDecl(Child, "onCheckImportAttributes");
+        const check_ptr: ?*const c.JSModuleCheckSupportedImportAttributes = if (has_check) blk: {
+            const trampoline = struct {
+                fn call(ctx: ?*c.JSContext, opaque_ptr: ?*anyopaque, attributes: c.JSValue) callconv(.c) c_int {
+                    const h: Handler = @ptrCast(@alignCast(opaque_ptr));
+                    return h.onCheckImportAttributes(Context{ .ptr = ctx }, attributes);
+                }
+            };
+            break :blk @ptrCast(&trampoline.call);
+        } else null;
+
+        c.JS_SetModuleLoaderFunc2(self.ptr, normalize_ptr, @ptrCast(&loader_trampoline.call), check_ptr, @ptrCast(handler));
+    }
+
     /// Add a runtime finalizer. The handler struct must have an `onFinalize` method
     /// with signature `fn(self) void`.
     /// The handler pointer must outlive the runtime.
@@ -1658,6 +1699,14 @@ pub const Context = struct {
     pub inline fn setModuleExport(self: Context, m: Module, name: []const u8, val: Value) !void {
         const ret = c.JS_SetModuleExport(self.ptr, m.ptr, name.ptr, val);
         if (ret < 0) return error.ModuleExportFailed;
+    }
+
+    pub fn moduleFromValue(self: Context, val: Value) ?Module {
+        const is_mod = self.isModule(val);
+        const ptr = c.JS_VALUE_GET_PTR(val);
+        self.freeValue(val);
+        if (!is_mod or ptr == null) return null;
+        return Module{ .ptr = @ptrCast(@alignCast(ptr)) };
     }
 
     pub inline fn getModulePrivateValue(self: Context, m: Module) Value {
