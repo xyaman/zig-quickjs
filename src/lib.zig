@@ -132,8 +132,7 @@ pub const Runtime = struct {
     fn js_calloc(runtime_ptr: ?*anyopaque, count: usize, size: usize) callconv(.c) ?*anyopaque {
         const runtime: *const Runtime = @ptrCast(@alignCast(runtime_ptr));
         const len = count * size;
-        const result = runtime.allocator.alloc(u8, H + len) catch |err|
-            @panic(@errorName(err));
+        const result = runtime.allocator.alloc(u8, H + len) catch return null;
         @memset(result, 0);
         std.mem.writeInt(usize, result[0..S], len, .little);
         return result[H..].ptr;
@@ -141,8 +140,7 @@ pub const Runtime = struct {
 
     fn js_malloc(runtime_ptr: ?*anyopaque, size: usize) callconv(.c) ?*anyopaque {
         const runtime: *const Runtime = @ptrCast(@alignCast(runtime_ptr));
-        const result = runtime.allocator.alloc(u8, H + size) catch |err|
-            @panic(@errorName(err));
+        const result = runtime.allocator.alloc(u8, H + size) catch return null;
         std.mem.writeInt(usize, result[0..S], size, .little);
         return result[H..].ptr;
     }
@@ -158,8 +156,7 @@ pub const Runtime = struct {
         const runtime: *const Runtime = @ptrCast(@alignCast(runtime_ptr));
         const old_ptr: [*]u8 = @ptrFromInt(@intFromPtr(ptr) - H);
         const old_len = std.mem.readInt(usize, old_ptr[0..S], .little);
-        const result = runtime.allocator.realloc(old_ptr[0 .. H + old_len], H + new_len) catch |err|
-            @panic(@errorName(err));
+        const result = runtime.allocator.realloc(old_ptr[0 .. H + old_len], H + new_len) catch return null;
         std.mem.writeInt(usize, result[0..S], new_len, .little);
         return result[H..].ptr;
     }
@@ -1148,7 +1145,7 @@ pub const Context = struct {
                 h.onFree(.{ .ptr = rt }, data);
             }
         };
-        return c.JS_NewArrayBuffer(self.ptr, buf.ptr, buf.len, @ptrCast(&trampoline.call), @ptrCast(handler), is_shared);
+        return c.JS_NewArrayBuffer(self.ptr, buf.ptr, buf.len, buf.len, @ptrCast(&trampoline.call), @ptrCast(handler), is_shared);
     }
 
     pub inline fn newArrayBufferCopy(self: Context, buf: []const u8) Value {

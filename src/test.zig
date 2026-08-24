@@ -1388,3 +1388,61 @@ test "newModule" {
         c.addModuleExport(mod, "answer") catch {};
     }
 }
+
+const ArmedFailingAllocator = struct {
+    backing: std.mem.Allocator,
+    armed: bool = false,
+
+    fn allocator(self: *ArmedFailingAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable = std.mem.Allocator.VTable{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    };
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *ArmedFailingAllocator = @ptrCast(@alignCast(ctx));
+        if (self.armed) return null;
+        return self.backing.rawAlloc(len, alignment, ret_addr);
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *ArmedFailingAllocator = @ptrCast(@alignCast(ctx));
+        if (self.armed) return false;
+        return self.backing.rawResize(memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *ArmedFailingAllocator = @ptrCast(@alignCast(ctx));
+        if (self.armed) return null;
+        return self.backing.rawRemap(memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *ArmedFailingAllocator = @ptrCast(@alignCast(ctx));
+        self.backing.rawFree(memory, alignment, ret_addr);
+    }
+};
+
+test "allocator returns null on OOM instead of a panic" {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+
+    var failing = ArmedFailingAllocator{ .backing = gpa.allocator() };
+
+    const r = try quickjs.Runtime.init(failing.allocator());
+    defer r.deinit();
+
+    const c = quickjs.Context.init(r);
+    defer c.deinit();
+
+    failing.armed = true;
+    const result = c.eval("new Array(100000).fill(0)", "oom.js", .{});
+    failing.armed = false;
+
+    try std.testing.expectError(error.Exception, result);
+}
