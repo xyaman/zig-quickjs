@@ -1166,6 +1166,43 @@ test "Serialization roundtrip" {
     try std.testing.expect(c.isString(y_val));
 }
 
+test "Bytecode roundtrip for scripts and modules" {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    const r = try quickjs.Runtime.init(allocator);
+    defer r.deinit();
+
+    const c = quickjs.Context.init(r);
+    defer c.deinit();
+
+    const script_bytes = try c.compileToBytecode(allocator, "21 * 2", "script.js", .global);
+    defer allocator.free(script_bytes);
+
+    const script_obj = try c.readBytecode(script_bytes);
+    const script_result = try c.evalBytecode(script_obj, .global);
+    defer c.freeValue(script_result);
+    try std.testing.expectEqual(@as(i32, 42), try c.toInt32(script_result));
+
+    const module_bytes = try c.compileToBytecode(
+        allocator,
+        "export const answer = 42; globalThis.moduleAnswer = answer;",
+        "module.js",
+        .module,
+    );
+    defer allocator.free(module_bytes);
+
+    const module_obj = try c.readBytecode(module_bytes);
+    const module_result = try c.evalBytecode(module_obj, .module);
+    defer c.freeValue(module_result);
+    try std.testing.expect(c.isPromise(module_result));
+
+    const answer = try c.eval("globalThis.moduleAnswer", "read.js", .{});
+    defer c.freeValue(answer);
+    try std.testing.expectEqual(@as(i32, 42), try c.toInt32(answer));
+}
+
 test "getClassID" {
     var gpa = std.heap.DebugAllocator(.{}).init;
     defer std.debug.assert(gpa.deinit() == .ok);

@@ -1667,6 +1667,38 @@ pub const Context = struct {
         return c.JS_EvalFunction(self.ptr, fun_obj);
     }
 
+    /// Compile source to a bytecode blob. The caller owns the returned bytes.
+    pub fn compileToBytecode(self: Context, allocator: std.mem.Allocator, input: []const u8, filename: [*:0]const u8, eval_type: EvalType) ![]u8 {
+        const obj = try self.eval(input, filename, .{ .type = eval_type, .compile_only = true });
+        defer self.freeValue(obj);
+
+        const bytes = try self.writeObject(obj, .{ .bytecode = true });
+        defer self.free(bytes.ptr);
+
+        return allocator.dupe(u8, bytes);
+    }
+
+    /// Read a trusted, version-locked bytecode blob produced by `compileToBytecode`.
+    pub inline fn readBytecode(self: Context, bytes: []const u8) error{Exception}!Value {
+        const obj = c.JS_ReadObject(self.ptr, bytes.ptr, bytes.len, c.JS_READ_OBJ_BYTECODE);
+        if (self.isException(obj)) return error.Exception;
+        return obj;
+    }
+
+    /// Instantiate and evaluate bytecode. This consumes `obj`.
+    pub fn evalBytecode(self: Context, obj: Value, eval_type: EvalType) error{ Exception, ModuleResolutionFailed }!Value {
+        if (eval_type == .module) {
+            self.resolveModule(obj) catch |err| {
+                self.freeValue(obj);
+                return err;
+            };
+        }
+
+        const result = self.evalFunction(obj);
+        if (self.isException(result)) return error.Exception;
+        return result;
+    }
+
     pub inline fn getScriptOrModuleName(self: Context, n_stack_levels: i32) Atom {
         return c.JS_GetScriptOrModuleName(self.ptr, n_stack_levels);
     }
