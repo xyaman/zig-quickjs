@@ -34,6 +34,8 @@ pub fn build(b: *std.Build) void {
             "libunicode.c",
             "dtoa.c",
         },
+        // cutils.h falls back to a null-pointer offsetof when libc headers do not define it (musl), and UBSan traps on it.
+        .flags = &.{"-Doffsetof(type, member)=__builtin_offsetof(type, member)"},
     });
 
     // Tests
