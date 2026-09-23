@@ -1102,7 +1102,8 @@ pub const Context = struct {
         async: bool = false,
     };
 
-    pub inline fn eval(self: Context, input: []const u8, filename: [*:0]const u8, flags: EvalFlags) error{Exception}!Value {
+    /// QuickJS reads `input[input.len]`, so the input must end in a NUL byte.
+    pub inline fn eval(self: Context, input: [:0]const u8, filename: [*:0]const u8, flags: EvalFlags) error{Exception}!Value {
         var c_flags: c_int = 0;
 
         // Set eval type flag
@@ -1125,7 +1126,7 @@ pub const Context = struct {
         }
     }
 
-    pub inline fn evalThis(self: Context, this_obj: Value, input: []const u8, filename: [*:0]const u8, flags: EvalFlags) error{Exception}!Value {
+    pub inline fn evalThis(self: Context, this_obj: Value, input: [:0]const u8, filename: [*:0]const u8, flags: EvalFlags) error{Exception}!Value {
         var c_flags: c_int = 0;
         switch (flags.type) {
             .global => c_flags |= c.JS_EVAL_TYPE_GLOBAL,
@@ -1277,7 +1278,8 @@ pub const Context = struct {
     }
 
     // JSON methods
-    pub inline fn parseJSON(self: Context, buf: []const u8, filename: [*:0]const u8) Value {
+    /// QuickJS finds the end of the text at `buf[buf.len]`, so the text must end in a NUL byte.
+    pub inline fn parseJSON(self: Context, buf: [:0]const u8, filename: [*:0]const u8) Value {
         return c.JS_ParseJSON(self.ptr, buf.ptr, buf.len, filename);
     }
 
@@ -1668,7 +1670,7 @@ pub const Context = struct {
     }
 
     /// Compile source to a bytecode blob. The caller owns the returned bytes.
-    pub fn compileToBytecode(self: Context, allocator: std.mem.Allocator, input: []const u8, filename: [*:0]const u8, eval_type: EvalType) ![]u8 {
+    pub fn compileToBytecode(self: Context, allocator: std.mem.Allocator, input: [:0]const u8, filename: [*:0]const u8, eval_type: EvalType) ![]u8 {
         const obj = try self.eval(input, filename, .{ .type = eval_type, .compile_only = true });
         defer self.freeValue(obj);
 
