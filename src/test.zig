@@ -1,3 +1,4 @@
+//! Tests for QuickJS values and their owner lifetimes.
 const std = @import("std");
 
 const quickjs = @import("quickjs");
@@ -1524,4 +1525,31 @@ test "module loader resolves an import via moduleFromValue" {
     const rv = try c.eval("globalThis.result", "read", .{});
     defer c.freeValue(rv);
     try std.testing.expectEqual(@as(i32, 5), try c.toInt32(rv));
+}
+
+test "UTF-16 substring conversion preserves its parent and outlives the value" {
+    const r = try quickjs.Runtime.init(std.testing.allocator);
+    defer r.deinit();
+    const c = quickjs.Context.init(r);
+    defer c.deinit();
+
+    {
+        const slice = try c.eval(
+            "globalThis.parentText = '\\u754c'.repeat(4000); parentText.slice(100, 2100)",
+            "utf16-slice.js",
+            .{},
+        );
+        const text_borrow = c.toCStringUTF16(slice) catch |err| {
+            c.freeValue(slice);
+            return err;
+        };
+        c.freeValue(slice);
+        defer c.freeCStringUTF16(text_borrow.ptr);
+        try std.testing.expectEqual(@as(usize, 2000), text_borrow.len);
+        for (text_borrow) |unit| try std.testing.expectEqual(@as(u16, 0x754c), unit);
+    }
+
+    const unchanged = try c.eval("parentText === '\\u754c'.repeat(4000)", "utf16-parent.js", .{});
+    defer c.freeValue(unchanged);
+    try std.testing.expect(try c.toBool(unchanged));
 }

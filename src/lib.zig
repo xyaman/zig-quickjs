@@ -1,3 +1,4 @@
+//! Zig bindings for QuickJS values, contexts, and runtimes.
 const std = @import("std");
 const c = @import("c");
 
@@ -254,7 +255,8 @@ pub const Runtime = struct {
         c.JS_FreeCStringRT(self.ptr, ptr);
     }
 
-    pub inline fn freeCStringUTF16(self: *const Runtime, ptr: [*:0]const u16) void {
+    /// Release a UTF-16 result from this runtime. The pointer has no terminator. This does not fail.
+    pub inline fn freeCStringUTF16(self: *const Runtime, ptr: [*]const u16) void {
         c.JS_FreeCStringRT_UTF16(self.ptr, ptr);
     }
 
@@ -763,18 +765,19 @@ pub const Context = struct {
         return ptr[0..len :0];
     }
 
-    pub inline fn toCStringUTF16(self: Context, val: Value) ![:0]const u16 {
+    /// Read UTF-16 code units without a terminator. The caller releases the result with freeCStringUTF16. A conversion or allocation failure returns Exception.
+    pub inline fn toCStringUTF16(self: Context, val: Value) error{Exception}![]const u16 {
         var len: usize = undefined;
-        const ptr = c.JS_ToCStringLenUTF16(self.ptr, &len, val);
-        if (ptr == null) return error.Exception;
-        return @as([*:0]const u16, @ptrCast(ptr))[0..len :0];
+        const ptr = c.JS_ToCStringLenUTF16(self.ptr, &len, val) orelse return error.Exception;
+        return ptr[0..len];
     }
 
     pub inline fn freeCString(self: Context, ptr: [*:0]const u8) void {
         c.JS_FreeCString(self.ptr, ptr);
     }
 
-    pub inline fn freeCStringUTF16(self: Context, ptr: [*:0]const u16) void {
+    /// Release a UTF-16 result from this context. The pointer has no terminator. This does not fail.
+    pub inline fn freeCStringUTF16(self: Context, ptr: [*]const u16) void {
         c.JS_FreeCStringUTF16(self.ptr, ptr);
     }
 

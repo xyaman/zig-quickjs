@@ -63,6 +63,14 @@ const got = ctx.getProperty(obj, key);
 defer ctx.freeValue(got);
 ```
 
+## UTF-16 strings
+
+`Context.toCStringUTF16(value)` returns a `[]const u16` with no NUL terminator.
+The length counts UTF-16 code units. The result can contain unmatched surrogates.
+The caller releases the result with `Context.freeCStringUTF16(text.ptr)` or
+`Runtime.freeCStringUTF16(text.ptr)`. The result stays valid until that release,
+even if the caller releases the JavaScript value first.
+
 ## Calling JavaScript Functions
 
 ```zig
